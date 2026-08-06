@@ -1,0 +1,65 @@
+services:
+  api:
+    image: ${SCORERR_IMAGE:-ghcr.io/PROPRIETAIRE_GITHUB/scorerr:latest}
+    command: ['node', 'dist/api/server.js']
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_PATH: /data/scorerr.db
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      BODY_LIMIT_BYTES: ${BODY_LIMIT_BYTES:-1048576}
+    ports:
+      - '${PORT_SCORERR:-3000}:3000'
+    volumes:
+      - scorerr-data:/data
+    networks:
+      - scorerr-network
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      replicas: 1
+
+  worker:
+    image: ${SCORERR_IMAGE:-ghcr.io/PROPRIETAIRE_GITHUB/scorerr:latest}
+    command: ['node', 'dist/worker/worker.js']
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_PATH: /data/scorerr.db
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-1000}
+      WORKER_SCHEMA_WAIT_INTERVAL_MS: ${WORKER_SCHEMA_WAIT_INTERVAL_MS:-1000}
+      WORKER_LOCK_TIMEOUT_MS: ${WORKER_LOCK_TIMEOUT_MS:-300000}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-3}
+    volumes:
+      - scorerr-data:/data
+    networks:
+      - scorerr-network
+    healthcheck:
+      disable: true
+    deploy:
+      replicas: 1
+
+volumes:
+  scorerr-data:
+    name: ${SCORERR_VOLUME_NAME:-scorerr-data}
+
+networks:
+  scorerr-network:
+    name: ${DOCKER_NETWORK_NAME:-scorerr-network}
+    driver: bridge
