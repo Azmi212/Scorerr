@@ -21,6 +21,7 @@ describe('POST /api/webhooks/radarr', () => {
       accepted: true,
       duplicate: false,
       eventId: 1,
+      deliveryId: 1,
       taskId: 1,
     });
     const event = context.database.sqlite.prepare('SELECT * FROM events').get() as {
@@ -34,6 +35,11 @@ describe('POST /api/webhooks/radarr', () => {
     expect(context.database.sqlite.prepare('SELECT COUNT(*) AS count FROM tasks').get()).toEqual({
       count: 1,
     });
+    expect(
+      context.database.sqlite
+        .prepare('SELECT event_id AS eventId, duplicate FROM webhook_deliveries')
+        .get(),
+    ).toEqual({ eventId: 1, duplicate: 0 });
   });
 
   it('detects normalized duplicates despite property ordering and whitespace', async () => {
@@ -53,13 +59,47 @@ describe('POST /api/webhooks/radarr', () => {
 
     expect(first.statusCode).toBe(202);
     expect(duplicate.statusCode).toBe(202);
-    expect(duplicate.json()).toEqual({ accepted: true, duplicate: true, eventId: 1 });
+    expect(duplicate.json()).toEqual({
+      accepted: true,
+      duplicate: true,
+      eventId: 1,
+      deliveryId: 2,
+    });
     expect(context.database.sqlite.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({
       count: 1,
     });
     expect(context.database.sqlite.prepare('SELECT COUNT(*) AS count FROM tasks').get()).toEqual({
       count: 1,
     });
+    expect(
+      context.database.sqlite
+        .prepare('SELECT id, duplicate FROM webhook_deliveries ORDER BY id')
+        .all(),
+    ).toEqual([
+      { id: 1, duplicate: 0 },
+      { id: 2, duplicate: 1 },
+    ]);
+  });
+
+  it('preserves MovieAdded business idempotence while recording every delivery', async () => {
+    context = createTestContext();
+    const request = {
+      method: 'POST' as const,
+      url: '/api/webhooks/radarr',
+      headers: { 'content-type': 'application/json' },
+      payload: '{"eventType":"MovieAdded","movie":{"id":99}}',
+    };
+    await context.app.inject(request);
+    await context.app.inject(request);
+    expect(context.database.sqlite.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({
+      count: 1,
+    });
+    expect(context.database.sqlite.prepare('SELECT COUNT(*) AS count FROM tasks').get()).toEqual({
+      count: 1,
+    });
+    expect(
+      context.database.sqlite.prepare('SELECT COUNT(*) AS count FROM webhook_deliveries').get(),
+    ).toEqual({ count: 2 });
   });
 
   it('rejects malformed JSON and payloads above the configured limit', async () => {

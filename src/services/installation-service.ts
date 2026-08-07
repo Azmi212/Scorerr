@@ -23,7 +23,7 @@ import {
   installationSnapshots,
   managedResources,
   serviceConnections,
-  events,
+  webhookDeliveries,
 } from '../database/schema.js';
 import { safeError, sanitize, ServiceClientError } from '../security/redaction.js';
 import { redactProbeData } from '../security/probe-redaction.js';
@@ -599,23 +599,27 @@ export class InstallationService {
       throw new ServiceClientError('incompatible_response', 'SCORERR_PUBLIC_URL is required');
     const radarr = this.clients.radarr(connection.baseUrl, this.secrets.get(connection.secretRef));
     const payload = buildWebhookPayload(await radarr.notificationSchemas(), callbackUrl);
+    const startedAt = Date.now();
     const baseline = this.database.db
-      .select({ id: events.id })
-      .from(events)
-      .orderBy(desc(events.id))
+      .select({ id: webhookDeliveries.id })
+      .from(webhookDeliveries)
+      .orderBy(desc(webhookDeliveries.id))
       .get();
     const response = await radarr.testNotification(payload);
     const deadline = Date.now() + this.config.HTTP_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const received = this.database.sqlite
         .prepare(
-          "SELECT id, received_at AS receivedAt FROM events WHERE id > ? AND event_type = 'Test' ORDER BY id DESC LIMIT 1",
+          "SELECT id, event_id AS eventId, duplicate, received_at AS receivedAt FROM webhook_deliveries WHERE id > ? AND received_at >= ? AND event_type = 'Test' ORDER BY id DESC LIMIT 1",
         )
-        .get(baseline?.id ?? 0) as { id: number; receivedAt: number } | undefined;
+        .get(baseline?.id ?? 0, startedAt) as
+        { id: number; eventId: number; duplicate: number; receivedAt: number } | undefined;
       if (received) {
         return {
           delivered: true,
-          eventId: received.id,
+          deliveryId: received.id,
+          eventId: received.eventId,
+          duplicate: received.duplicate === 1,
           receivedAt: new Date(received.receivedAt).toISOString(),
           radarrResponse: redactProbeData(response).value,
         };

@@ -17,6 +17,26 @@ export const events = sqliteTable(
   ],
 );
 
+export const webhookDeliveries = sqliteTable(
+  'webhook_deliveries',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    source: text('source').notNull(),
+    eventType: text('event_type'),
+    eventId: integer('event_id')
+      .notNull()
+      .references(() => events.id, { onDelete: 'cascade' }),
+    eventFingerprint: text('event_fingerprint').notNull(),
+    payloadRawHash: text('payload_raw_hash').notNull(),
+    duplicate: integer('duplicate', { mode: 'boolean' }).notNull(),
+    receivedAt: integer('received_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    index('webhook_deliveries_received_index').on(table.receivedAt, table.id),
+    index('webhook_deliveries_event_type_index').on(table.eventType, table.receivedAt),
+  ],
+);
+
 export const tasks = sqliteTable(
   'tasks',
   {

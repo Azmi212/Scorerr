@@ -1,13 +1,14 @@
 import { eq } from 'drizzle-orm';
 
 import type { DatabaseContext } from '../database/client.js';
-import { events, tasks } from '../database/schema.js';
+import { events, tasks, webhookDeliveries } from '../database/schema.js';
 import { fingerprintEvent, sha256 } from './fingerprint.js';
 
 export interface WebhookResult {
   accepted: true;
   duplicate: boolean;
   eventId: number;
+  deliveryId: number;
   taskId?: number;
 }
 
@@ -24,6 +25,7 @@ export function recordWebhook(
 ): WebhookResult {
   const payloadRawHash = sha256(payloadRaw);
   const eventFingerprint = fingerprintEvent(payload);
+  const eventType = getEventType(payload);
   const now = new Date();
 
   return database.sqlite.transaction((): WebhookResult => {
@@ -31,7 +33,7 @@ export function recordWebhook(
       .insert(events)
       .values({
         source: 'radarr',
-        eventType: getEventType(payload),
+        eventType,
         payloadRaw,
         payloadRawHash,
         eventFingerprint,
@@ -48,9 +50,21 @@ export function recordWebhook(
       .all();
 
     if (!event) throw new Error('Event insertion could not be verified');
-    if (insertResult.changes === 0) {
-      return { accepted: true, duplicate: true, eventId: event.id };
-    }
+    const duplicate = insertResult.changes === 0;
+    const deliveryResult = database.db
+      .insert(webhookDeliveries)
+      .values({
+        source: 'radarr',
+        eventType,
+        eventId: event.id,
+        eventFingerprint,
+        payloadRawHash,
+        duplicate,
+        receivedAt: now,
+      })
+      .run();
+    const deliveryId = Number(deliveryResult.lastInsertRowid);
+    if (duplicate) return { accepted: true, duplicate: true, eventId: event.id, deliveryId };
 
     const taskResult = database.db
       .insert(tasks)
@@ -67,6 +81,7 @@ export function recordWebhook(
       accepted: true,
       duplicate: false,
       eventId: event.id,
+      deliveryId,
       taskId: Number(taskResult.lastInsertRowid),
     };
   })();

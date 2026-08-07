@@ -40,10 +40,13 @@ Avec `SETUP_WRITES_ENABLED=false`, `GET /api/setup/probe` fait exécuter par l'i
 
 `POST /api/setup/radarr/test-webhook` est une opération séparée utilisant uniquement le test non persistant `POST /api/v3/notification/test`. Elle est refusée tant que `SETUP_NON_PERSISTENT_TESTS_ENABLED=false`, indépendamment de `SETUP_WRITES_ENABLED`. Elle ne crée aucune notification, mais ce POST distant ne doit être autorisé qu'explicitement après revue de la preview.
 
+La confirmation du test repose sur une nouvelle ligne `webhook_deliveries` de type `Test`, postérieure au lancement. Elle ne dépend pas de la création d'un nouvel événement métier : un payload de test déjà présent dans `events` reste dédupliqué tout en confirmant la nouvelle livraison HTTP. Les logs du receiver incluent `deliveryId`, `eventId` et `duplicate`, sans journaliser le payload.
+
 ## Fonctionnement actuel
 
 - `POST /api/webhooks/radarr` répond avec HTTP 202 à un JSON valide ;
 - le corps exact reçu est conservé dans `payloadRaw` ;
+- chaque POST reçu crée une ligne `webhook_deliveries`, même lorsque l'événement métier est un doublon ;
 - `payloadRawHash` sert au diagnostic ;
 - `eventFingerprint`, calculé après tri récursif des propriétés JSON, détecte les doublons ;
 - un événement inédit crée une tâche `pending` dans la même transaction SQLite ;

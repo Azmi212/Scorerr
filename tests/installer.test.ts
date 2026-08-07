@@ -18,6 +18,7 @@ import { applyMigrations } from '../src/database/migrate.js';
 import { SqliteSecretStore } from '../src/security/secret-store.js';
 import { ServiceClientError } from '../src/security/redaction.js';
 import { InstallationService, type ClientFactory } from '../src/services/installation-service.js';
+import { recordWebhook } from '../src/services/webhook-service.js';
 
 const webhookSchema = [
   {
@@ -59,6 +60,7 @@ interface State {
   created: number;
   deleted: number;
   schemaMissing?: boolean;
+  onTestNotification?: () => void;
 }
 
 function initialState(): State {
@@ -115,7 +117,10 @@ function factory(state: State): ClientFactory {
           state.notifications = state.notifications.filter((item) => item.id !== id);
           return null;
         },
-        testNotification: async () => ({ isValid: true }),
+        testNotification: async () => {
+          state.onTestNotification?.();
+          return { isValid: true };
+        },
       }) as never,
     seerr: (_url, key) =>
       ({
@@ -484,6 +489,71 @@ describe('scorerr installer', () => {
     });
     expect(response.statusCode).toBe(422);
     expect(response.json()).toMatchObject({ code: 'non_persistent_tests_disabled' });
+  });
+  it('confirms a new duplicate Test delivery without requiring a new business event', async () => {
+    ctx = context({
+      SETUP_WRITES_ENABLED: false,
+      SETUP_NON_PERSISTENT_TESTS_ENABLED: true,
+    });
+    await connect(ctx);
+    const payload = { eventType: 'Test', message: 'Radarr test' };
+    const raw = JSON.stringify(payload);
+    recordWebhook(ctx.database, raw, payload);
+    const database = ctx.database;
+    ctx.state.onTestNotification = () => {
+      recordWebhook(database, raw, payload);
+    };
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/radarr/test-webhook',
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      delivered: true,
+      deliveryId: 2,
+      eventId: 1,
+      duplicate: true,
+    });
+    expect(ctx.database.sqlite.prepare('SELECT COUNT(*) AS count FROM events').get()).toEqual({
+      count: 1,
+    });
+    expect(
+      ctx.database.sqlite.prepare('SELECT COUNT(*) AS count FROM webhook_deliveries').get(),
+    ).toEqual({ count: 2 });
+  });
+  it('does not treat an old Test delivery as proof of a new delivery', async () => {
+    ctx = context({
+      SETUP_WRITES_ENABLED: false,
+      SETUP_NON_PERSISTENT_TESTS_ENABLED: true,
+    });
+    await connect(ctx);
+    recordWebhook(ctx.database, '{"eventType":"Test","old":true}', {
+      eventType: 'Test',
+      old: true,
+    });
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/radarr/test-webhook',
+      payload: {},
+    });
+    expect(response.json()).toMatchObject({ delivered: false });
+  });
+  it('times out when no Test delivery is received', async () => {
+    ctx = context({
+      SETUP_WRITES_ENABLED: false,
+      SETUP_NON_PERSISTENT_TESTS_ENABLED: true,
+    });
+    await connect(ctx);
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/radarr/test-webhook',
+      payload: {},
+    });
+    expect(response.json()).toEqual({
+      delivered: false,
+      error: 'Radarr accepted the test but no Test webhook was received before timeout',
+    });
   });
   it('returns and stores a redacted real-probe compatibility report using GET clients only', async () => {
     ctx = context({ SETUP_WRITES_ENABLED: false });
