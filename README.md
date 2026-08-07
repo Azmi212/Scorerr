@@ -34,7 +34,11 @@ Les clients et adaptateurs isolent les variations d'API. La création Radarr exi
 
 ### Probe réel en lecture seule
 
-Avec `SETUP_WRITES_ENABLED=false`, `GET /api/setup/probe` fait exécuter par l'instance déployée uniquement les cinq lectures autorisées : statut, notifications et schéma de notification Radarr, puis réglages Radarr et réglages publics Seerr. Un `404` sur le schéma Radarr est rapporté comme information de compatibilité. Le rapport et les réponses brutes utiles sont redacted avant leur enregistrement dans `installation_probe_reports` et avant leur retour au navigateur. Aucun test de notification ni endpoint distant d'écriture n'est appelé.
+Avec `SETUP_WRITES_ENABLED=false`, `GET /api/setup/probe` fait exécuter par l'instance déployée uniquement les lectures autorisées : statut, notifications et schéma de notification Radarr, puis réglages Radarr, réglages publics et `GET /api/v1/status` Seerr. Un endpoint de schéma ou de statut indisponible est rapporté comme information de compatibilité. Le rapport et les réponses brutes utiles sont redacted avant leur enregistrement dans `installation_probe_reports` et avant leur retour au navigateur.
+
+`GET /api/setup/apply-preview` relit les contrats nécessaires et retourne les opérations prévues, leur ordre, les actions `skipped` et les payloads Radarr/Seerr redacted. Il ne fait aucun appel distant d'écriture. Le webhook préexistant pointant vers scorerr avec `onMovieAdded=true` est accepté même si des triggers supplémentaires sont actifs, mais il ne devient jamais une ressource possédée par scorerr.
+
+`POST /api/setup/radarr/test-webhook` est une opération séparée utilisant uniquement le test non persistant `POST /api/v3/notification/test`. Elle est refusée tant que `SETUP_NON_PERSISTENT_TESTS_ENABLED=false`, indépendamment de `SETUP_WRITES_ENABLED`. Elle ne crée aucune notification, mais ce POST distant ne doit être autorisé qu'explicitement après revue de la preview.
 
 ## Fonctionnement actuel
 

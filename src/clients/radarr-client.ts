@@ -17,6 +17,9 @@ export class RadarrClient {
   createNotification(payload: unknown): Promise<unknown> {
     return this.http.request('POST', '/api/v3/notification', payload);
   }
+  testNotification(payload: unknown): Promise<unknown> {
+    return this.http.request('POST', '/api/v3/notification/test', payload);
+  }
   deleteNotification(id: number): Promise<unknown> {
     return this.http.request('DELETE', `/api/v3/notification/${String(id)}`);
   }

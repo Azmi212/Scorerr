@@ -46,7 +46,7 @@ async function run(): Promise<void> {
     log.info({ workerId, taskId: task.id, eventId: task.eventId }, 'probe task claimed');
     const completed = completeProbeTask(database, task.id, workerId);
     if (!completed) log.error({ workerId, taskId: task.id }, 'probe task completion rejected');
-    else log.info({ workerId, taskId: task.id, result: 'probe_observed' }, 'probe task completed');
+    else log.info({ workerId, taskId: task.id }, 'probe task completed');
   }
 }
 

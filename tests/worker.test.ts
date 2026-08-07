@@ -33,11 +33,29 @@ describe('persistent task lifecycle', () => {
     };
     expect(task).toMatchObject({
       status: 'completed',
-      result: 'probe_observed',
+      result: 'probe_ignored_non_movie_added',
       locked_by: 'worker-a',
     });
     expect(task.locked_at).toBeTypeOf('number');
     expect(task.completed_at).toBeTypeOf('number');
+  });
+
+  it('marks MovieAdded as eligible and ignores MovieFileDeleteForUpgrade', () => {
+    context = createTestContext();
+    recordWebhook(context.database, '{"eventType":"MovieAdded"}', { eventType: 'MovieAdded' });
+    recordWebhook(context.database, '{"eventType":"MovieFileDeleteForUpgrade"}', {
+      eventType: 'MovieFileDeleteForUpgrade',
+    });
+    const first = claimNextTask(context.database, 'worker-filter');
+    if (!first) throw new Error('Expected MovieAdded task');
+    expect(completeProbeTask(context.database, first.id, 'worker-filter')).toBe(true);
+    const second = claimNextTask(context.database, 'worker-filter');
+    if (!second) throw new Error('Expected delete task');
+    expect(completeProbeTask(context.database, second.id, 'worker-filter')).toBe(true);
+    expect(context.database.sqlite.prepare('SELECT result FROM tasks ORDER BY id').all()).toEqual([
+      { result: 'probe_observed_movie_added' },
+      { result: 'probe_ignored_non_movie_added' },
+    ]);
   });
 
   it('requeues an abandoned task without incrementing its attempts', () => {

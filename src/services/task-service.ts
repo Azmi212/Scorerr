@@ -38,14 +38,31 @@ export function completeProbeTask(
   workerId: string,
 ): boolean {
   const now = Date.now();
-  const result = database.sqlite
-    .prepare(
-      `UPDATE tasks
-       SET status = 'completed', result = 'probe_observed', completed_at = ?, updated_at = ?
+  return database.sqlite.transaction(() => {
+    const event = database.sqlite
+      .prepare(
+        `SELECT events.event_type AS eventType
+         FROM tasks JOIN events ON events.id = tasks.event_id
+         WHERE tasks.id = ? AND tasks.status = 'processing' AND tasks.locked_by = ?`,
+      )
+      .get(taskId, workerId) as { eventType: string | null } | undefined;
+    if (!event) return false;
+    const probeResult = isOptimizationEligibleEvent(event.eventType)
+      ? 'probe_observed_movie_added'
+      : 'probe_ignored_non_movie_added';
+    const result = database.sqlite
+      .prepare(
+        `UPDATE tasks
+       SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
        WHERE id = ? AND status = 'processing' AND locked_by = ?`,
-    )
-    .run(now, now, taskId, workerId);
-  return result.changes === 1;
+      )
+      .run(probeResult, now, now, taskId, workerId);
+    return result.changes === 1;
+  })();
+}
+
+export function isOptimizationEligibleEvent(eventType: string | null): boolean {
+  return eventType === 'MovieAdded';
 }
 
 export interface RecoveryResult {

@@ -11,6 +11,9 @@ export class SeerrClient {
   publicSettings(): Promise<unknown> {
     return this.http.request('GET', '/api/v1/settings/public');
   }
+  status(): Promise<unknown> {
+    return this.http.request('GET', '/api/v1/status');
+  }
   updateRadarr(id: number, payload: unknown): Promise<unknown> {
     return this.http.request('PUT', `/api/v1/settings/radarr/${String(id)}`, payload);
   }

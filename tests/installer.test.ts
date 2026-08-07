@@ -6,6 +6,12 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildApp } from '../src/api/app.js';
+import {
+  buildWebhookPayload,
+  classifyScorerrWebhook,
+  parseNotifications,
+} from '../src/adapters/radarr-adapter.js';
+import { buildSeerrUpdate, parseSeerrInstances } from '../src/adapters/seerr-adapter.js';
 import type { AppConfig } from '../src/config/env.js';
 import { createDatabase, type DatabaseContext } from '../src/database/client.js';
 import { applyMigrations } from '../src/database/migrate.js';
@@ -15,14 +21,34 @@ import { InstallationService, type ClientFactory } from '../src/services/install
 
 const webhookSchema = [
   {
+    name: '',
     implementation: 'Webhook',
+    configContract: 'WebhookSettings',
+    infoLink: 'https://wiki.servarr.com/radarr/supported#webhook',
+    onGrab: false,
+    onDownload: false,
+    onUpgrade: false,
+    onRename: false,
+    onMovieAdded: false,
+    supportsOnMovieAdded: true,
+    onMovieDelete: false,
+    onMovieFileDelete: false,
+    onMovieFileDeleteForUpgrade: false,
+    onHealthIssue: false,
+    onHealthRestored: false,
+    onApplicationUpdate: false,
+    supportsOnApplicationUpdate: true,
+    tags: [],
     fields: [
       { name: 'url', value: '' },
       { name: 'method', value: 1 },
+      { name: 'username', value: '' },
+      { name: 'password', value: '' },
+      { name: 'headers', value: [] },
     ],
   },
 ];
-const radarrStatus = { version: '5.7.0', instanceName: 'Main Radarr' };
+const radarrStatus = { version: '6.2.1.10461', instanceName: 'Main Radarr' };
 
 interface State {
   radarrKey: string;
@@ -89,6 +115,7 @@ function factory(state: State): ClientFactory {
           state.notifications = state.notifications.filter((item) => item.id !== id);
           return null;
         },
+        testNotification: async () => ({ isValid: true }),
       }) as never,
     seerr: (_url, key) =>
       ({
@@ -101,6 +128,7 @@ function factory(state: State): ClientFactory {
           return state.instances;
         },
         publicSettings: async () => ({ version: '2.4.0' }),
+        status: async () => ({ version: '2.7.3' }),
         updateRadarr: async (id: number, payload: unknown) => {
           const current = state.instances.find((item) => item.id === id);
           if (!current) throw new Error('missing');
@@ -137,6 +165,7 @@ function context(overrides: Partial<AppConfig> = {}, state = initialState()): Se
     HTTP_MAX_RESPONSE_BYTES: 1024 * 1024,
     SETUP_DIAGNOSTIC_TTL_MS: 300_000,
     SETUP_WRITES_ENABLED: true,
+    SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
     WORKER_POLL_INTERVAL_MS: 100,
     WORKER_SCHEMA_WAIT_INTERVAL_MS: 100,
     WORKER_LOCK_TIMEOUT_MS: 300_000,
@@ -184,6 +213,84 @@ describe('scorerr installer', () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain('scorerr installer');
     expect(response.body).not.toContain(ctx.state.radarrKey);
+  });
+  it('recognizes a preexisting compatible webhook with an extra trigger', () => {
+    const notifications = parseNotifications([
+      {
+        id: 42,
+        name: 'Existing webhook',
+        implementation: 'Webhook',
+        configContract: 'WebhookSettings',
+        onMovieAdded: true,
+        supportsOnMovieAdded: true,
+        onMovieFileDeleteForUpgrade: true,
+        fields: [{ name: 'url', value: 'http://scorerr:3000/api/webhooks/radarr' }],
+      },
+    ]);
+    expect(
+      classifyScorerrWebhook(notifications, 'http://scorerr:3000/api/webhooks/radarr', new Set()),
+    ).toMatchObject({
+      state: 'preexisting_compatible_extra_triggers',
+      extraTriggers: ['onMovieFileDeleteForUpgrade'],
+    });
+  });
+  it('builds the exact observed Radarr Webhook payload without inventing fields', () => {
+    const payload = buildWebhookPayload(webhookSchema, 'http://scorerr:3000/api/webhooks/radarr');
+    expect(payload).toEqual({
+      ...webhookSchema[0],
+      name: 'scorerr-movie-added',
+      onMovieAdded: true,
+      fields: [
+        { name: 'url', value: 'http://scorerr:3000/api/webhooks/radarr' },
+        { name: 'method', value: 1 },
+        { name: 'username', value: '' },
+        { name: 'password', value: '' },
+        { name: 'headers', value: [] },
+      ],
+    });
+    expect(payload.onMovieFileDeleteForUpgrade).toBe(false);
+  });
+  it('builds the documented Seerr PUT payload and excludes observed GET-only tags', () => {
+    const [instance] = parseSeerrInstances([
+      {
+        id: 4,
+        name: 'Main',
+        hostname: 'radarr',
+        port: 7878,
+        apiKey: 'secret',
+        useSsl: false,
+        baseUrl: '/radarr',
+        activeProfileId: 6,
+        activeProfileName: 'HD',
+        activeDirectory: '/movies',
+        is4k: false,
+        minimumAvailability: 'released',
+        isDefault: true,
+        externalUrl: 'https://radarr.example',
+        syncEnabled: true,
+        preventSearch: false,
+        tags: [1],
+        tagRequests: true,
+      },
+    ]);
+    if (!instance) throw new Error('Expected Seerr fixture');
+    expect(buildSeerrUpdate(instance, true)).toEqual({
+      name: 'Main',
+      hostname: 'radarr',
+      port: 7878,
+      apiKey: 'secret',
+      useSsl: false,
+      baseUrl: '/radarr',
+      activeProfileId: 6,
+      activeProfileName: 'HD',
+      activeDirectory: '/movies',
+      is4k: false,
+      minimumAvailability: 'released',
+      isDefault: true,
+      externalUrl: 'https://radarr.example',
+      syncEnabled: true,
+      preventSearch: true,
+    });
   });
   it('tests connections and never returns or stores plaintext keys', async () => {
     ctx = context();
@@ -318,6 +425,66 @@ describe('scorerr installer', () => {
     expect(response.json()).toMatchObject({ code: 'writes_disabled' });
     expect(ctx.state.created).toBe(0);
   });
+  it('previews apply with redacted payloads and no side effects', async () => {
+    const state = initialState();
+    state.instances[0] = {
+      ...state.instances[0],
+      tags: [1],
+      tagRequests: true,
+      activeProfileId: 6,
+      activeProfileName: 'HD',
+      activeDirectory: '/movies',
+      minimumAvailability: 'released',
+      isDefault: true,
+      syncEnabled: true,
+    };
+    state.notifications = [
+      {
+        id: 20,
+        implementation: 'Webhook',
+        configContract: 'WebhookSettings',
+        onMovieAdded: true,
+        onMovieFileDeleteForUpgrade: true,
+        fields: [{ name: 'url', value: 'http://scorerr:3000/api/webhooks/radarr' }],
+      },
+    ];
+    ctx = context({ SETUP_WRITES_ENABLED: false }, state);
+    await connect(ctx);
+    const response = await ctx.app.inject({ method: 'GET', url: '/api/setup/apply-preview' });
+    expect(response.statusCode).toBe(200);
+    const preview = response.json<{
+      payloads: { seerr: Record<string, unknown> };
+      [key: string]: unknown;
+    }>();
+    expect(preview).toMatchObject({
+      mode: 'preview_only',
+      noRemoteWritesPerformed: true,
+      changes: [
+        {
+          id: 'radarr-create-webhook',
+          status: 'skipped',
+          reason: 'preexisting_compatible_extra_triggers',
+        },
+        { id: 'seerr-disable-auto-search', status: 'planned' },
+      ],
+    });
+    expect(preview.payloads.seerr).not.toHaveProperty('tags');
+    expect(preview.payloads.seerr).not.toHaveProperty('tagRequests');
+    expect(response.body).not.toContain('nested-radarr-secret');
+    expect(ctx.state.created).toBe(0);
+    expect(ctx.state.deleted).toBe(0);
+  });
+  it('refuses the non-persistent Radarr test while its dedicated flag is false', async () => {
+    ctx = context({ SETUP_WRITES_ENABLED: false, SETUP_NON_PERSISTENT_TESTS_ENABLED: false });
+    await connect(ctx);
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/radarr/test-webhook',
+      payload: {},
+    });
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toMatchObject({ code: 'non_persistent_tests_disabled' });
+  });
   it('returns and stores a redacted real-probe compatibility report using GET clients only', async () => {
     ctx = context({ SETUP_WRITES_ENABLED: false });
     await connect(ctx);
@@ -326,8 +493,8 @@ describe('scorerr installer', () => {
     expect(response.json()).toMatchObject({
       mode: 'read_only',
       writesEnabled: false,
-      radarr: { version: '5.7.0', webhookSchemaEndpoint: { available: true } },
-      seerr: { version: '2.4.0', preventSearch: false, preventSearchTypes: ['boolean'] },
+      radarr: { version: '6.2.1.10461', webhookSchemaEndpoint: { available: true } },
+      seerr: { version: '2.7.3', preventSearch: false, preventSearchTypes: ['boolean'] },
       association: { matched: true, certain: true },
       sensitiveData: { detected: true },
     });

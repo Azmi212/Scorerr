@@ -31,6 +31,7 @@ export class ServiceClientError extends Error {
       | 'unsupported_version'
       | 'response_too_large'
       | 'not_found'
+      | 'non_persistent_tests_disabled'
       | 'writes_disabled',
     public readonly safeMessage: string,
     public readonly httpStatus?: number,

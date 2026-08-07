@@ -4,6 +4,7 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 
 import {
   buildWebhookPayload,
+  classifyScorerrWebhook,
   findScorerrWebhook,
   parseNotifications,
   parseRadarrStatus,
@@ -22,6 +23,7 @@ import {
   installationSnapshots,
   managedResources,
   serviceConnections,
+  events,
 } from '../database/schema.js';
 import { safeError, sanitize, ServiceClientError } from '../security/redaction.js';
 import { redactProbeData } from '../security/probe-redaction.js';
@@ -53,7 +55,13 @@ export interface DiagnosticResult {
   status: 'ready' | 'selection_required' | 'blocked' | 'already_configured';
   callbackUrl: string | null;
   callbackWarning: string;
-  radarr: { connected: boolean; version: string; instanceName?: string; webhookPresent: boolean };
+  radarr: {
+    connected: boolean;
+    version: string;
+    instanceName?: string;
+    webhookPresent: boolean;
+    webhookState: import('../adapters/radarr-adapter.js').WebhookState;
+  };
   seerr: {
     connected: boolean;
     version: string | null;
@@ -222,9 +230,24 @@ export class InstallationService {
         'incompatible_response',
         'Selected Seerr Radarr instance does not exist',
       );
-    const webhook = callbackUrl ? findScorerrWebhook(notifications, callbackUrl) : undefined;
+    const classification = callbackUrl
+      ? classifyScorerrWebhook(notifications, callbackUrl, this.managedNotificationIds())
+      : { state: 'missing' as const, extraTriggers: [] };
+    const webhook = [
+      'managed_exact',
+      'preexisting_exact',
+      'preexisting_compatible_extra_triggers',
+    ].includes(classification.state)
+      ? classification.notification
+      : undefined;
     const changes: DiagnosticResult['changesRequired'] = [];
-    if (!webhook)
+    if (classification.state === 'conflict')
+      changes.push({
+        id: 'radarr-webhook-conflict',
+        service: 'radarr',
+        description: 'Résoudre le conflit de notification Radarr avant installation',
+      });
+    else if (!webhook)
       changes.push({
         id: 'radarr-create-webhook',
         service: 'radarr',
@@ -256,6 +279,7 @@ export class InstallationService {
         version: status.version,
         ...(status.instanceName ? { instanceName: status.instanceName } : {}),
         webhookPresent: Boolean(webhook),
+        webhookState: classification.state,
       },
       seerr: {
         connected: true,
@@ -316,13 +340,15 @@ export class InstallationService {
       this.secrets.get(seerrConnection.secretRef),
     );
 
-    const [statusRaw, notificationsRaw, schemaResult, instancesRaw, publicRaw] = await Promise.all([
-      radarr.status(),
-      radarr.notifications(),
-      this.optionalProbeGet(() => radarr.notificationSchemas()),
-      seerr.radarrSettings(),
-      seerr.publicSettings(),
-    ]);
+    const [statusRaw, notificationsRaw, schemaResult, instancesRaw, publicRaw, seerrStatusRaw] =
+      await Promise.all([
+        radarr.status(),
+        radarr.notifications(),
+        this.optionalProbeGet(() => radarr.notificationSchemas()),
+        seerr.radarrSettings(),
+        seerr.publicSettings(),
+        this.optionalProbeGet(() => seerr.status()),
+      ]);
     const radarrStatus = parseRadarrStatus(statusRaw);
     const notifications = parseNotifications(notificationsRaw);
     const instances = parseSeerrInstances(instancesRaw);
@@ -332,9 +358,13 @@ export class InstallationService {
     const selected = matches.length === 1 ? matches[0] : undefined;
     const publicRecord =
       publicRaw && typeof publicRaw === 'object' ? (publicRaw as Record<string, unknown>) : {};
+    const seerrStatusRecord =
+      seerrStatusRaw.data && typeof seerrStatusRaw.data === 'object'
+        ? (seerrStatusRaw.data as Record<string, unknown>)
+        : {};
     const seerrVersion =
       ['version', 'appVersion', 'commitTag']
-        .map((key) => publicRecord[key])
+        .map((key) => seerrStatusRecord[key] ?? publicRecord[key])
         .find((value): value is string => typeof value === 'string') ?? null;
     const movieAddedControls = [
       ...new Set(
@@ -361,7 +391,11 @@ export class InstallationService {
         notifications: notificationsRaw,
         notificationSchema: schemaResult.data,
       },
-      seerr: { radarrSettings: instancesRaw, publicSettings: publicRaw },
+      seerr: {
+        radarrSettings: instancesRaw,
+        publicSettings: publicRaw,
+        status: seerrStatusRaw.data,
+      },
     });
     const readOnlyCandidates = [
       ...new Set(
@@ -398,6 +432,7 @@ export class InstallationService {
         'GET Radarr /api/v3/notification/schema',
         'GET Seerr /api/v1/settings/radarr',
         'GET Seerr /api/v1/settings/public',
+        'GET Seerr /api/v1/status',
       ],
       radarr: {
         version: radarrStatus.version,
@@ -421,6 +456,11 @@ export class InstallationService {
       },
       seerr: {
         version: seerrVersion,
+        statusEndpoint: {
+          available: seerrStatusRaw.available,
+          status: seerrStatusRaw.status,
+          error: seerrStatusRaw.error ?? null,
+        },
         radarrInstanceCount: instances.length,
         instanceFields: [...new Set(instances.flatMap((item) => Object.keys(item)))].sort(),
         preventSearch: selected?.preventSearch ?? null,
@@ -467,6 +507,125 @@ export class InstallationService {
       })
       .run();
     return { reportId: Number(inserted.lastInsertRowid), ...report };
+  }
+
+  async applyPreview(): Promise<Record<string, unknown>> {
+    const radarrConnection = this.requireConnection('radarr');
+    const seerrConnection = this.requireConnection('seerr');
+    const callbackUrl = this.callbackUrl();
+    if (!callbackUrl)
+      throw new ServiceClientError('incompatible_response', 'SCORERR_PUBLIC_URL is required');
+    const radarr = this.clients.radarr(
+      radarrConnection.baseUrl,
+      this.secrets.get(radarrConnection.secretRef),
+    );
+    const seerr = this.clients.seerr(
+      seerrConnection.baseUrl,
+      this.secrets.get(seerrConnection.secretRef),
+    );
+    const [notificationsRaw, schemasRaw, instancesRaw] = await Promise.all([
+      radarr.notifications(),
+      radarr.notificationSchemas(),
+      seerr.radarrSettings(),
+    ]);
+    const notifications = parseNotifications(notificationsRaw);
+    const classification = classifyScorerrWebhook(
+      notifications,
+      callbackUrl,
+      this.managedNotificationIds(),
+    );
+    const instances = parseSeerrInstances(instancesRaw);
+    const latestSelection = this.latestDiagnostic()?.selectedSeerrRadarrId;
+    const matches = instances.filter((item) =>
+      this.urlsMatch(instanceUrl(item), radarrConnection.baseUrl),
+    );
+    const selected =
+      (latestSelection === null || latestSelection === undefined
+        ? undefined
+        : instances.find((item) => item.id === latestSelection)) ??
+      (matches.length === 1 ? matches[0] : undefined);
+    if (!selected)
+      throw new ServiceClientError(
+        'incompatible_response',
+        'A single selected Seerr Radarr instance is required',
+      );
+    const radarrPayload = buildWebhookPayload(schemasRaw, callbackUrl);
+    const seerrPayload = buildSeerrUpdate(selected, true);
+    const radarrSkipped = classification.state !== 'missing';
+    const seerrSkipped = selected.preventSearch;
+    const redactedPayloads = redactProbeData({ radarr: radarrPayload, seerr: seerrPayload });
+    return {
+      mode: 'preview_only',
+      writesEnabled: this.config.SETUP_WRITES_ENABLED,
+      noRemoteWritesPerformed: true,
+      endpoints: {
+        radarr: `POST ${new URL('/api/v3/notification', `${radarrConnection.baseUrl}/`).toString()}`,
+        seerr: `PUT ${new URL(`/api/v1/settings/radarr/${String(selected.id)}`, `${seerrConnection.baseUrl}/`).toString()}`,
+      },
+      operationOrder: [
+        'radarr-create-webhook-if-missing',
+        'radarr-read-and-verify',
+        'seerr-set-preventSearch-true-if-needed',
+        'seerr-read-and-verify',
+      ],
+      changes: [
+        {
+          id: 'radarr-create-webhook',
+          status: radarrSkipped ? 'skipped' : 'planned',
+          reason: radarrSkipped ? classification.state : 'missing',
+          extraTriggers: classification.extraTriggers,
+        },
+        {
+          id: 'seerr-disable-auto-search',
+          status: seerrSkipped ? 'skipped' : 'planned',
+          current: selected.preventSearch,
+          desired: true,
+        },
+      ],
+      payloads: redactedPayloads.value,
+      redactedFields: redactedPayloads.sensitiveFields,
+    };
+  }
+
+  async testWebhook(): Promise<Record<string, unknown>> {
+    if (!this.config.SETUP_NON_PERSISTENT_TESTS_ENABLED)
+      throw new ServiceClientError(
+        'non_persistent_tests_disabled',
+        'Non-persistent Radarr notification tests are disabled',
+      );
+    const connection = this.requireConnection('radarr');
+    const callbackUrl = this.callbackUrl();
+    if (!callbackUrl)
+      throw new ServiceClientError('incompatible_response', 'SCORERR_PUBLIC_URL is required');
+    const radarr = this.clients.radarr(connection.baseUrl, this.secrets.get(connection.secretRef));
+    const payload = buildWebhookPayload(await radarr.notificationSchemas(), callbackUrl);
+    const baseline = this.database.db
+      .select({ id: events.id })
+      .from(events)
+      .orderBy(desc(events.id))
+      .get();
+    const response = await radarr.testNotification(payload);
+    const deadline = Date.now() + this.config.HTTP_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const received = this.database.sqlite
+        .prepare(
+          "SELECT id, received_at AS receivedAt FROM events WHERE id > ? AND event_type = 'Test' ORDER BY id DESC LIMIT 1",
+        )
+        .get(baseline?.id ?? 0) as { id: number; receivedAt: number } | undefined;
+      if (received) {
+        return {
+          delivered: true,
+          eventId: received.id,
+          receivedAt: new Date(received.receivedAt).toISOString(),
+          radarrResponse: redactProbeData(response).value,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return {
+      delivered: false,
+      error: 'Radarr accepted the test but no Test webhook was received before timeout',
+    };
   }
 
   createSnapshot(): { snapshotId: number; reused: boolean } {
@@ -525,7 +684,17 @@ export class InstallationService {
         this.secrets.get(seerrConnection.secretRef),
       );
       let notifications = parseNotifications(await radarr.notifications());
-      let webhook = findScorerrWebhook(notifications, snapshot.callbackUrl);
+      const initialClassification = classifyScorerrWebhook(
+        notifications,
+        snapshot.callbackUrl,
+        this.managedNotificationIds(),
+      );
+      if (initialClassification.state === 'conflict')
+        throw new ServiceClientError(
+          'incompatible_response',
+          'Radarr webhook configuration conflicts with the desired scorerr webhook',
+        );
+      let webhook = initialClassification.notification;
       let webhookResult = 'already_configured';
       if (!webhook) {
         const payload = buildWebhookPayload(
@@ -748,6 +917,23 @@ export class InstallationService {
         .from(serviceConnections)
         .where(eq(serviceConnections.id, id))
         .get()?.version ?? null
+    );
+  }
+  private managedNotificationIds(): Set<number> {
+    return new Set(
+      this.database.db
+        .select({ externalId: managedResources.externalId })
+        .from(managedResources)
+        .where(
+          and(
+            eq(managedResources.service, 'radarr'),
+            eq(managedResources.resourceType, 'notification'),
+            eq(managedResources.createdByScorerr, true),
+            isNull(managedResources.removedAt),
+          ),
+        )
+        .all()
+        .map((item) => Number(item.externalId)),
     );
   }
   private async optionalProbeGet(request: () => Promise<unknown>): Promise<ProbeEndpointResult> {
