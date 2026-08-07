@@ -1,0 +1,315 @@
+/* eslint-disable @typescript-eslint/require-await */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { buildApp } from '../src/api/app.js';
+import type { AppConfig } from '../src/config/env.js';
+import { createDatabase, type DatabaseContext } from '../src/database/client.js';
+import { applyMigrations } from '../src/database/migrate.js';
+import { SqliteSecretStore } from '../src/security/secret-store.js';
+import { InstallationService, type ClientFactory } from '../src/services/installation-service.js';
+
+const webhookSchema = [
+  {
+    implementation: 'Webhook',
+    fields: [
+      { name: 'url', value: '' },
+      { name: 'method', value: 1 },
+    ],
+  },
+];
+const radarrStatus = { version: '5.7.0', instanceName: 'Main Radarr' };
+
+interface State {
+  radarrKey: string;
+  seerrKey: string;
+  unavailable?: boolean;
+  notifications: Record<string, unknown>[];
+  instances: Record<string, unknown>[];
+  created: number;
+  deleted: number;
+}
+
+function initialState(): State {
+  return {
+    radarrKey: 'radarr-super-secret',
+    seerrKey: 'seerr-super-secret',
+    notifications: [],
+    instances: [
+      {
+        id: 4,
+        name: 'Main',
+        hostname: 'radarr',
+        port: 7878,
+        apiKey: 'nested-radarr-secret',
+        useSsl: false,
+        baseUrl: '',
+        active: true,
+        is4k: false,
+        preventSearch: false,
+      },
+    ],
+    created: 0,
+    deleted: 0,
+  };
+}
+
+function factory(state: State): ClientFactory {
+  return {
+    radarr: (_url, key) =>
+      ({
+        status: async () => {
+          if (state.unavailable) throw new Error('offline');
+          if (key !== state.radarrKey)
+            throw Object.assign(new Error('bad key'), {
+              code: 'unauthorized',
+              safeMessage: 'Authentication was rejected',
+            });
+          return radarrStatus;
+        },
+        notifications: async () => state.notifications,
+        notificationSchemas: async () => webhookSchema,
+        createNotification: async (payload: unknown) => {
+          state.created++;
+          const body = payload as Record<string, unknown>;
+          state.notifications.push({ ...body, id: 80 });
+          return { id: 80 };
+        },
+        deleteNotification: async (id: number) => {
+          state.deleted++;
+          state.notifications = state.notifications.filter((item) => item.id !== id);
+          return null;
+        },
+      }) as never,
+    seerr: (_url, key) =>
+      ({
+        radarrSettings: async () => {
+          if (key !== state.seerrKey)
+            throw Object.assign(new Error('bad key'), {
+              code: 'unauthorized',
+              safeMessage: 'Authentication was rejected',
+            });
+          return state.instances;
+        },
+        publicSettings: async () => ({ version: '2.4.0' }),
+        updateRadarr: async (id: number, payload: unknown) => {
+          const current = state.instances.find((item) => item.id === id);
+          if (!current) throw new Error('missing');
+          state.instances = state.instances.map((item) =>
+            item.id === id ? { ...item, ...(payload as object) } : item,
+          );
+          return current;
+        },
+      }) as never,
+  };
+}
+
+interface SetupContext {
+  app: ReturnType<typeof buildApp>;
+  database: DatabaseContext;
+  state: State;
+  directory: string;
+  cleanup(): Promise<void>;
+}
+function context(overrides: Partial<AppConfig> = {}, state = initialState()): SetupContext {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scorerr-installer-'));
+  const dbPath = path.join(directory, 'test.db');
+  const database = createDatabase(dbPath);
+  applyMigrations(database);
+  const config: AppConfig = {
+    NODE_ENV: 'test',
+    HOST: '127.0.0.1',
+    PORT: 3000,
+    DATABASE_PATH: dbPath,
+    LOG_LEVEL: 'silent',
+    BODY_LIMIT_BYTES: 1024 * 1024,
+    SCORERR_PUBLIC_URL: 'http://scorerr:3000',
+    HTTP_TIMEOUT_MS: 100,
+    HTTP_MAX_RESPONSE_BYTES: 1024 * 1024,
+    SETUP_DIAGNOSTIC_TTL_MS: 300_000,
+    SETUP_WRITES_ENABLED: true,
+    WORKER_POLL_INTERVAL_MS: 100,
+    WORKER_SCHEMA_WAIT_INTERVAL_MS: 100,
+    WORKER_LOCK_TIMEOUT_MS: 300_000,
+    WORKER_MAX_ATTEMPTS: 3,
+    ...overrides,
+  };
+  const secrets = new SqliteSecretStore(database, dbPath, config.SCORERR_MASTER_KEY);
+  const service = new InstallationService(database, config, secrets, factory(state));
+  const app = buildApp({ config, database, installationService: service });
+  return {
+    app,
+    database,
+    state,
+    directory,
+    cleanup: async () => {
+      await app.close();
+      database.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+async function connect(ctx: SetupContext): Promise<void> {
+  const connections: [string, string, string][] = [
+    ['radarr', 'http://radarr:7878', ctx.state.radarrKey],
+    ['seerr', 'http://seerr:5055', ctx.state.seerrKey],
+  ];
+  for (const [service, url, apiKey] of connections) {
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/setup/${service}/test`,
+      payload: { baseUrl: url, apiKey },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain(apiKey);
+  }
+}
+
+describe('scorerr installer', () => {
+  let ctx: SetupContext | undefined;
+  afterEach(async () => ctx?.cleanup());
+  it('serves the local-only setup interface without keys', async () => {
+    ctx = context();
+    const response = await ctx.app.inject({ url: '/setup' });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('scorerr installer');
+    expect(response.body).not.toContain(ctx.state.radarrKey);
+  });
+  it('tests connections and never returns or stores plaintext keys', async () => {
+    ctx = context();
+    await connect(ctx);
+    const dump = fs.readFileSync(path.join(ctx.directory, 'test.db'));
+    expect(dump.includes(Buffer.from(ctx.state.radarrKey))).toBe(false);
+    expect(
+      ctx.database.sqlite.prepare('SELECT ciphertext FROM encrypted_secrets').all(),
+    ).not.toContain(ctx.state.radarrKey);
+  });
+  it('rejects an invalid API key without leaking it', async () => {
+    ctx = context();
+    const key = 'wrong-secret-key';
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/radarr/test',
+      payload: { baseUrl: 'http://radarr:7878', apiKey: key },
+    });
+    expect(response.statusCode).toBe(422);
+    expect(response.body).not.toContain(key);
+  });
+  it('requires selection when Seerr has multiple non-matching instances', async () => {
+    const state = initialState();
+    state.instances.push({ ...state.instances[0], id: 5, name: 'Other', hostname: 'other-radarr' });
+    state.instances[0] = { ...state.instances[0], hostname: 'first-radarr' };
+    ctx = context({}, state);
+    await connect(ctx);
+    const response = await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    expect(response.json()).toMatchObject({
+      status: 'selection_required',
+      seerr: { radarrInstanceFound: false },
+    });
+  });
+  it('diagnoses callback, missing webhook, and preventSearch', async () => {
+    ctx = context();
+    await connect(ctx);
+    const response = await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    expect(response.json()).toMatchObject({
+      status: 'ready',
+      callbackUrl: 'http://scorerr:3000/api/webhooks/radarr',
+      radarr: { webhookPresent: false },
+      seerr: { preventSearch: false },
+      ready: true,
+    });
+  });
+  it('applies in Radarr-then-Seerr order and is idempotent', async () => {
+    ctx = context();
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/snapshot', payload: {} });
+    const first = await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    expect(first.json()).toMatchObject({
+      status: 'operational',
+      webhook: 'created',
+      seerr: 'updated',
+    });
+    expect(ctx.state.instances[0]?.preventSearch).toBe(true);
+    const second = await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    expect(second.json()).toMatchObject({
+      webhook: 'already_configured',
+      seerr: 'already_configured',
+    });
+    expect(ctx.state.created).toBe(1);
+    const repeatedSnapshot = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/snapshot',
+      payload: {},
+    });
+    expect(repeatedSnapshot.json()).toMatchObject({ reused: true });
+    expect(
+      ctx.database.sqlite.prepare('SELECT COUNT(*) AS count FROM installation_snapshots').get(),
+    ).toEqual({ count: 1 });
+  });
+  it('rolls back Seerr then removes only its owned webhook', async () => {
+    ctx = context();
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/snapshot', payload: {} });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/rollback',
+      payload: {},
+    });
+    expect(response.json()).toEqual({
+      status: 'rolled_back',
+      seerr: 'restored',
+      webhook: 'removed',
+    });
+    expect(ctx.state.instances[0]?.preventSearch).toBe(false);
+    expect(ctx.state.deleted).toBe(1);
+  });
+  it('treats a manually deleted owned webhook as already removed', async () => {
+    ctx = context();
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/snapshot', payload: {} });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    ctx.state.notifications = [];
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/rollback',
+      payload: {},
+    });
+    expect(response.json()).toMatchObject({ webhook: 'already_removed' });
+  });
+  it('reports manual intervention and keeps the webhook on rollback conflict', async () => {
+    const state = initialState();
+    state.instances[0] = { ...state.instances[0], preventSearch: true };
+    ctx = context({}, state);
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/snapshot', payload: {} });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    ctx.state.instances[0] = { ...ctx.state.instances[0], preventSearch: false };
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/rollback',
+      payload: {},
+    });
+    expect(response.json()).toMatchObject({ status: 'manual_intervention_required' });
+    expect(ctx.state.deleted).toBe(0);
+    expect(ctx.state.notifications).toHaveLength(1);
+  });
+  it('blocks all writes by default until the read-only probe is validated', async () => {
+    ctx = context({ SETUP_WRITES_ENABLED: false });
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/snapshot', payload: {} });
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ code: 'writes_disabled' });
+    expect(ctx.state.created).toBe(0);
+  });
+});

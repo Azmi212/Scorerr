@@ -1,6 +1,36 @@
 # scorerr
 
-`scorerr` est dans sa première phase, **Radarr Integration Probe**. Cette version reçoit des webhooks JSON, les conserve dans SQLite et valide le cycle de vie d'une file de tâches. Elle ne contacte jamais Radarr et ne déclenche aucun grab ni téléchargement.
+`scorerr` comprend désormais **scorerr installer** en plus de l'Integration Probe. L'installer prépare les connexions Radarr et Seerr, diagnostique `preventSearch` et la notification MovieAdded, puis fournit un apply/rollback vérifiable. Aucun moteur de scoring, grab ou téléchargement n'est présent.
+
+> Les écritures distantes restent verrouillées par défaut (`SETUP_WRITES_ENABLED=false`) jusqu'à validation des contrats lors d'un probe réel en lecture seule.
+
+## Utiliser scorerr installer
+
+Ouvrez `http://ADRESSE_SCORERR:PORT/setup` depuis le réseau local. Cette interface d'administration n'a pas encore d'authentification : ne publiez ni `/setup` ni `/api/setup/*` sur Internet. Les réponses CORS ne sont pas activées, donc aucun accès cross-origin n'est accordé par défaut. Une couche `admin-auth` est prévue.
+
+1. Dans Radarr, trouvez la clé sous **Settings > General > Security > API Key**, puis saisissez son URL et testez.
+2. Dans Seerr/Jellyseerr, trouvez la clé sous **Settings > General > API Key**, puis saisissez son URL et testez.
+3. Lancez le diagnostic. Si plusieurs Radarr sont déclarés dans Seerr, choisissez explicitement l'instance.
+4. Vérifiez l'URL de callback affichée et les changements annoncés.
+5. Après le futur probe et l'activation explicite des écritures, le bouton crée le snapshot puis applique les changements.
+
+`SCORERR_PUBLIC_URL` est l'adresse que **Radarr** doit pouvoir joindre, pas nécessairement l'adresse utilisée dans le navigateur. Le callback final est `${SCORERR_PUBLIC_URL}/api/webhooks/radarr`. `http://scorerr:3000` fonctionne uniquement si Radarr partage un réseau Docker où ce nom est résolvable ; une IP LAN peut être nécessaire dans Portainer.
+
+### Changements automatiques et rollback
+
+L'apply crée d'abord, si nécessaire, une notification Radarr Webhook limitée à MovieAdded, vérifie sa présence, l'enregistre comme ressource possédée par `scorerr`, puis change uniquement `preventSearch` en `true` sur l'instance Seerr sélectionnée et vérifie le résultat. Un second apply ne duplique rien.
+
+Le rollback restaure d'abord la valeur originale de `preventSearch`. Il ne supprime ensuite que le webhook dont l'identifiant a été enregistré comme créé par `scorerr`. Une ressource déjà supprimée est acceptée. Une modification manuelle incompatible retourne `manual_intervention_required` et conserve le webhook lorsque la restauration Seerr n'est pas sûre.
+
+### Stockage et protection des secrets
+
+Les API Keys ne sont jamais renvoyées par les endpoints. Elles sont chiffrées dans SQLite avec AES-256-GCM. Si `SCORERR_MASTER_KEY` contient une clé de 32 octets encodée en base64, ou 64 caractères hexadécimaux, elle est utilisée. Sinon, `scorerr` génère `scorerr-master.key` à côté de la base sur le volume persistant. Ce fallback protège contre une fuite isolée de SQLite, pas contre un attaquant possédant tout le volume. Si des secrets existent et que cette clé disparaît, `scorerr` refuse d'en générer une nouvelle.
+
+Les URLs autorisent HTTP/HTTPS, les IP privées et les noms Docker. Les credentials intégrés, fragments, protocoles `file:`/`unix:`, réponses trop grandes et redirections sont refusés. Les appels ont un timeout. Comme le setup permet volontairement des accès au réseau interne, l'API doit rester sur un LAN de confiance.
+
+### Limitations de compatibilité
+
+Les clients et adaptateurs isolent les variations d'API. La création Radarr exige un schéma Webhook compatible exposant le champ `url`. La mise à jour Seerr utilise une liste explicite de champs inscriptibles et refuse d'inventer une clé manquante. Ces contrats doivent être confirmés en lecture seule avant de passer `SETUP_WRITES_ENABLED=true`. Le test natif d'une notification Radarr n'est pas activé tant que son contrat n'a pas été observé.
 
 ## Fonctionnement actuel
 
@@ -209,6 +239,8 @@ SCORERR_IMAGE=ghcr.io/PROPRIETAIRE_GITHUB/scorerr:latest
 PORT_SCORERR=3000
 DOCKER_NETWORK_NAME=scorerr-network
 SCORERR_VOLUME_NAME=scorerr-data
+SCORERR_PUBLIC_URL=http://ADRESSE_JOIGNABLE_DEPUIS_RADARR:3000
+SETUP_WRITES_ENABLED=false
 WORKER_LOCK_TIMEOUT_MS=300000
 WORKER_MAX_ATTEMPTS=3
 ```

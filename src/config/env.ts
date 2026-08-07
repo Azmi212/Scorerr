@@ -16,6 +16,31 @@ const envSchema = z.object({
     .min(1024)
     .max(10 * 1024 * 1024)
     .default(1024 * 1024),
+  SCORERR_PUBLIC_URL: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.url().optional(),
+  ),
+  SCORERR_MASTER_KEY: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.string().min(1).optional(),
+  ),
+  HTTP_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+  HTTP_MAX_RESPONSE_BYTES: z.coerce
+    .number()
+    .int()
+    .min(1024)
+    .max(10 * 1024 * 1024)
+    .default(2 * 1024 * 1024),
+  SETUP_DIAGNOSTIC_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(10_000)
+    .max(60 * 60 * 1000)
+    .default(300_000),
+  SETUP_WRITES_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   WORKER_SCHEMA_WAIT_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   WORKER_LOCK_TIMEOUT_MS: z.coerce
