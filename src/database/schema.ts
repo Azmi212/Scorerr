@@ -136,3 +136,10 @@ export const installationAuditLog = sqliteTable('installation_audit_log', {
   errorMessage: text('error_message'),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
 });
+
+export const installationProbeReports = sqliteTable('installation_probe_reports', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  version: integer('version').notNull().default(1),
+  reportJson: text('report_json').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+});

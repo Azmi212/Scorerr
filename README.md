@@ -32,6 +32,10 @@ Les URLs autorisent HTTP/HTTPS, les IP privées et les noms Docker. Les credenti
 
 Les clients et adaptateurs isolent les variations d'API. La création Radarr exige un schéma Webhook compatible exposant le champ `url`. La mise à jour Seerr utilise une liste explicite de champs inscriptibles et refuse d'inventer une clé manquante. Ces contrats doivent être confirmés en lecture seule avant de passer `SETUP_WRITES_ENABLED=true`. Le test natif d'une notification Radarr n'est pas activé tant que son contrat n'a pas été observé.
 
+### Probe réel en lecture seule
+
+Avec `SETUP_WRITES_ENABLED=false`, `GET /api/setup/probe` fait exécuter par l'instance déployée uniquement les cinq lectures autorisées : statut, notifications et schéma de notification Radarr, puis réglages Radarr et réglages publics Seerr. Un `404` sur le schéma Radarr est rapporté comme information de compatibilité. Le rapport et les réponses brutes utiles sont redacted avant leur enregistrement dans `installation_probe_reports` et avant leur retour au navigateur. Aucun test de notification ni endpoint distant d'écriture n'est appelé.
+
 ## Fonctionnement actuel
 
 - `POST /api/webhooks/radarr` répond avec HTTP 202 à un JSON valide ;

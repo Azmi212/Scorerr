@@ -10,6 +10,7 @@ import type { AppConfig } from '../src/config/env.js';
 import { createDatabase, type DatabaseContext } from '../src/database/client.js';
 import { applyMigrations } from '../src/database/migrate.js';
 import { SqliteSecretStore } from '../src/security/secret-store.js';
+import { ServiceClientError } from '../src/security/redaction.js';
 import { InstallationService, type ClientFactory } from '../src/services/installation-service.js';
 
 const webhookSchema = [
@@ -31,6 +32,7 @@ interface State {
   instances: Record<string, unknown>[];
   created: number;
   deleted: number;
+  schemaMissing?: boolean;
 }
 
 function initialState(): State {
@@ -71,7 +73,11 @@ function factory(state: State): ClientFactory {
           return radarrStatus;
         },
         notifications: async () => state.notifications,
-        notificationSchemas: async () => webhookSchema,
+        notificationSchemas: async () => {
+          if (state.schemaMissing)
+            throw new ServiceClientError('not_found', 'Service endpoint was not found', 404);
+          return webhookSchema;
+        },
         createNotification: async (payload: unknown) => {
           state.created++;
           const body = payload as Record<string, unknown>;
@@ -311,5 +317,37 @@ describe('scorerr installer', () => {
     expect(response.statusCode).toBe(409);
     expect(response.json()).toMatchObject({ code: 'writes_disabled' });
     expect(ctx.state.created).toBe(0);
+  });
+  it('returns and stores a redacted real-probe compatibility report using GET clients only', async () => {
+    ctx = context({ SETUP_WRITES_ENABLED: false });
+    await connect(ctx);
+    const response = await ctx.app.inject({ method: 'GET', url: '/api/setup/probe' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      mode: 'read_only',
+      writesEnabled: false,
+      radarr: { version: '5.7.0', webhookSchemaEndpoint: { available: true } },
+      seerr: { version: '2.4.0', preventSearch: false, preventSearchTypes: ['boolean'] },
+      association: { matched: true, certain: true },
+      sensitiveData: { detected: true },
+    });
+    expect(response.body).not.toContain('nested-radarr-secret');
+    expect(ctx.state.created).toBe(0);
+    expect(ctx.state.deleted).toBe(0);
+    const stored = ctx.database.sqlite
+      .prepare('SELECT report_json AS report FROM installation_probe_reports')
+      .get() as { report: string };
+    expect(stored.report).not.toContain('nested-radarr-secret');
+  });
+  it('reports a missing Radarr notification schema endpoint without failing the probe', async () => {
+    const state = initialState();
+    state.schemaMissing = true;
+    ctx = context({ SETUP_WRITES_ENABLED: false }, state);
+    await connect(ctx);
+    const response = await ctx.app.inject({ method: 'GET', url: '/api/setup/probe' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      radarr: { webhookSchemaEndpoint: { available: false, status: 'not_found' } },
+    });
   });
 });

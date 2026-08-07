@@ -57,6 +57,8 @@ export class SafeHttpClient {
       const response = await this.fetchImplementation(new URL(pathname, `${this.baseUrl}/`), init);
       if (response.status === 401 || response.status === 403)
         throw new ServiceClientError('unauthorized', 'Authentication was rejected');
+      if (response.status === 404)
+        throw new ServiceClientError('not_found', 'Service endpoint was not found', 404);
       if (response.status >= 300 && response.status < 400)
         throw new ServiceClientError('incompatible_response', 'HTTP redirects are not accepted');
       if (!response.ok)

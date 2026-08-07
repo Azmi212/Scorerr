@@ -26,6 +26,7 @@ export function registerSetupRoutes(app: FastifyInstance, service: InstallationS
     });
   }
   app.get('/api/setup/diagnostic', async () => service.diagnostic());
+  app.get('/api/setup/probe', async () => service.probe());
   app.put('/api/setup/seerr/radarr-selection', async (request, reply) => {
     const parsed = selectionSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid Radarr selection' });

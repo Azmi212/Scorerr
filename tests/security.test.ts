@@ -9,6 +9,7 @@ import { SafeHttpClient, normalizeServiceUrl } from '../src/clients/http-client.
 import { createDatabase } from '../src/database/client.js';
 import { applyMigrations } from '../src/database/migrate.js';
 import { SqliteSecretStore } from '../src/security/secret-store.js';
+import { redactProbeData } from '../src/security/probe-redaction.js';
 
 describe('setup transport security', () => {
   it('allows private and Docker HTTP targets but rejects unsafe URL forms', () => {
@@ -50,6 +51,18 @@ describe('setup transport security', () => {
       code: 'timeout',
       safeMessage: expect.not.stringContaining('timeout-secret'),
     });
+  });
+  it('redacts descriptor-style API keys and custom notification headers', () => {
+    const result = redactProbeData({
+      fields: [
+        { name: 'apiKey', value: 'seerr-secret' },
+        { name: 'headers', value: 'Authorization: Bearer radarr-secret' },
+      ],
+    });
+    const serialized = JSON.stringify(result.value);
+    expect(serialized).not.toContain('seerr-secret');
+    expect(serialized).not.toContain('radarr-secret');
+    expect(result.sensitiveFields).toHaveLength(2);
   });
 });
 

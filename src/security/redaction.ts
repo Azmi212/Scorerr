@@ -30,8 +30,10 @@ export class ServiceClientError extends Error {
       | 'incompatible_response'
       | 'unsupported_version'
       | 'response_too_large'
+      | 'not_found'
       | 'writes_disabled',
     public readonly safeMessage: string,
+    public readonly httpStatus?: number,
   ) {
     super(safeMessage);
     this.name = 'ServiceClientError';

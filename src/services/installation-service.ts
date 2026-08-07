@@ -18,11 +18,13 @@ import {
   installationAuditLog,
   installationDiagnostics,
   installationOperations,
+  installationProbeReports,
   installationSnapshots,
   managedResources,
   serviceConnections,
 } from '../database/schema.js';
 import { safeError, sanitize, ServiceClientError } from '../security/redaction.js';
+import { redactProbeData } from '../security/probe-redaction.js';
 import type { SecretStore } from '../security/secret-store.js';
 import { sha256 } from './fingerprint.js';
 
@@ -69,6 +71,13 @@ export interface DiagnosticResult {
   }[];
   ready: boolean;
   expiresAt?: string;
+}
+
+interface ProbeEndpointResult {
+  available: boolean;
+  status: 'ok' | 'not_found' | 'error';
+  data: unknown;
+  error?: { code: string; message: string };
 }
 
 export class InstallationService {
@@ -288,6 +297,176 @@ export class InstallationService {
       .run();
     result.id = Number(inserted.lastInsertRowid);
     return result;
+  }
+
+  async probe(): Promise<Record<string, unknown>> {
+    if (this.config.SETUP_WRITES_ENABLED)
+      throw new ServiceClientError(
+        'writes_disabled',
+        'The read-only probe requires SETUP_WRITES_ENABLED=false',
+      );
+    const radarrConnection = this.requireConnection('radarr');
+    const seerrConnection = this.requireConnection('seerr');
+    const radarr = this.clients.radarr(
+      radarrConnection.baseUrl,
+      this.secrets.get(radarrConnection.secretRef),
+    );
+    const seerr = this.clients.seerr(
+      seerrConnection.baseUrl,
+      this.secrets.get(seerrConnection.secretRef),
+    );
+
+    const [statusRaw, notificationsRaw, schemaResult, instancesRaw, publicRaw] = await Promise.all([
+      radarr.status(),
+      radarr.notifications(),
+      this.optionalProbeGet(() => radarr.notificationSchemas()),
+      seerr.radarrSettings(),
+      seerr.publicSettings(),
+    ]);
+    const radarrStatus = parseRadarrStatus(statusRaw);
+    const notifications = parseNotifications(notificationsRaw);
+    const instances = parseSeerrInstances(instancesRaw);
+    const matches = instances.filter((item) =>
+      this.urlsMatch(instanceUrl(item), radarrConnection.baseUrl),
+    );
+    const selected = matches.length === 1 ? matches[0] : undefined;
+    const publicRecord =
+      publicRaw && typeof publicRaw === 'object' ? (publicRaw as Record<string, unknown>) : {};
+    const seerrVersion =
+      ['version', 'appVersion', 'commitTag']
+        .map((key) => publicRecord[key])
+        .find((value): value is string => typeof value === 'string') ?? null;
+    const movieAddedControls = [
+      ...new Set(
+        notifications.flatMap((item) =>
+          Object.keys(item).filter((key) => key.toLowerCase().includes('movieadded')),
+        ),
+      ),
+    ];
+    const webhookNotifications = notifications.filter((item) => item.implementation === 'Webhook');
+    const schemaArray: unknown[] = Array.isArray(schemaResult.data)
+      ? (schemaResult.data as unknown[])
+      : [];
+    const webhookSchema =
+      schemaArray.find((item) =>
+        Boolean(
+          item &&
+          typeof item === 'object' &&
+          (item as Record<string, unknown>).implementation === 'Webhook',
+        ),
+      ) ?? null;
+    const redacted = redactProbeData({
+      radarr: {
+        status: statusRaw,
+        notifications: notificationsRaw,
+        notificationSchema: schemaResult.data,
+      },
+      seerr: { radarrSettings: instancesRaw, publicSettings: publicRaw },
+    });
+    const readOnlyCandidates = [
+      ...new Set(
+        instances.flatMap((item) =>
+          Object.keys(item).filter((key) =>
+            /^(id|createdAt|updatedAt|status|isDefault)$/i.test(key),
+          ),
+        ),
+      ),
+    ];
+    const modificationsRequired: string[] = [
+      'Replace or extend mock fixtures with the captured redacted response shapes.',
+      'Keep Seerr writes disabled until its exact writable PUT contract is validated separately.',
+    ];
+    if (!schemaResult.available)
+      modificationsRequired.push(
+        'Keep Radarr webhook creation unsupported for this version unless a validated provider contract is supplied.',
+      );
+    if (!movieAddedControls.includes('onMovieAdded'))
+      modificationsRequired.push(
+        'Adapt MovieAdded detection to the observed Radarr field before enabling writes.',
+      );
+    if (!instances.every((item) => typeof item.preventSearch === 'boolean'))
+      modificationsRequired.push('Adapt preventSearch parsing to the observed Seerr contract.');
+
+    const report = {
+      probeVersion: 1,
+      mode: 'read_only',
+      writesEnabled: false,
+      generatedAt: new Date().toISOString(),
+      callsPerformed: [
+        'GET Radarr /api/v3/system/status',
+        'GET Radarr /api/v3/notification',
+        'GET Radarr /api/v3/notification/schema',
+        'GET Seerr /api/v1/settings/radarr',
+        'GET Seerr /api/v1/settings/public',
+      ],
+      radarr: {
+        version: radarrStatus.version,
+        instanceName: radarrStatus.instanceName ?? null,
+        notificationCount: notifications.length,
+        notificationTopLevelFields: [
+          ...new Set(notifications.flatMap((item) => Object.keys(item))),
+        ].sort(),
+        implementations: [
+          ...new Set(notifications.map((item) => item.implementation ?? 'unknown')),
+        ].sort(),
+        webhookNotificationCount: webhookNotifications.length,
+        movieAddedControls,
+        webhookSchemaEndpoint: {
+          available: schemaResult.available,
+          status: schemaResult.status,
+          error: schemaResult.error ?? null,
+        },
+        webhookSchemaObserved: webhookSchema,
+        notificationTestEndpoint: 'not_probed_no_authorized_safe_get_contract',
+      },
+      seerr: {
+        version: seerrVersion,
+        radarrInstanceCount: instances.length,
+        instanceFields: [...new Set(instances.flatMap((item) => Object.keys(item)))].sort(),
+        preventSearch: selected?.preventSearch ?? null,
+        preventSearchTypes: [...new Set(instances.map((item) => typeof item.preventSearch))],
+        possibleReadOnlyFields: readOnlyCandidates,
+      },
+      association: {
+        matched: Boolean(selected),
+        certain: matches.length === 1,
+        method: 'normalized_url_exact_match',
+        matchCount: matches.length,
+        selectedSeerrRadarrId: selected?.id ?? null,
+        selectedSeerrRadarrName: selected?.name ?? null,
+      },
+      sensitiveData: {
+        detected: redacted.sensitiveFields.length > 0,
+        redactedFields: redacted.sensitiveFields,
+      },
+      rawRedacted: redacted.value,
+      compatibility: {
+        mockDifferences: {
+          expectedRadarrMovieAddedField: 'onMovieAdded',
+          observedRadarrMovieAddedFields: movieAddedControls,
+          expectedWebhookImplementation: 'Webhook',
+          webhookSchemaAvailable: schemaResult.available,
+          expectedSeerrPreventSearchType: 'boolean',
+          observedSeerrPreventSearchTypes: [
+            ...new Set(instances.map((item) => typeof item.preventSearch)),
+          ],
+        },
+        uncertainFields: [
+          'Seerr PUT writable versus read-only properties cannot be proven by GET responses alone.',
+          'A safe Radarr notification test endpoint is not inferred or invoked.',
+          'Radarr webhook creation payload remains unapproved until the observed schema is reviewed.',
+        ],
+        modificationsRequiredBeforeWrites: modificationsRequired,
+      },
+    };
+    const inserted = this.database.db
+      .insert(installationProbeReports)
+      .values({
+        reportJson: JSON.stringify(report),
+        createdAt: new Date(),
+      })
+      .run();
+    return { reportId: Number(inserted.lastInsertRowid), ...report };
   }
 
   createSnapshot(): { snapshotId: number; reused: boolean } {
@@ -570,6 +749,19 @@ export class InstallationService {
         .where(eq(serviceConnections.id, id))
         .get()?.version ?? null
     );
+  }
+  private async optionalProbeGet(request: () => Promise<unknown>): Promise<ProbeEndpointResult> {
+    try {
+      return { available: true, status: 'ok', data: await request() };
+    } catch (error) {
+      const safe = safeError(error);
+      return {
+        available: false,
+        status: safe.code === 'not_found' ? 'not_found' : 'error',
+        data: null,
+        error: safe,
+      };
+    }
   }
   private callbackUrl(): string | null {
     if (!this.config.SCORERR_PUBLIC_URL) return null;
