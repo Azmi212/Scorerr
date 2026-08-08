@@ -303,15 +303,7 @@ export class InstallationService {
       ready: Boolean(selected && callbackUrl),
       expiresAt: expiresAt.toISOString(),
     };
-    const fingerprint = sha256(
-      JSON.stringify(
-        sanitize({
-          status,
-          notifications,
-          instances: instances.map((item) => ({ ...item, apiKey: undefined })),
-        }),
-      ),
-    );
+    const fingerprint = this.installationFingerprint(status, notifications, instances);
     const inserted = this.database.db
       .insert(installationDiagnostics)
       .values({
@@ -838,13 +830,6 @@ export class InstallationService {
   }
 
   createSnapshot(): { snapshotId: number; reused: boolean } {
-    const existing = this.database.db
-      .select()
-      .from(installationSnapshots)
-      .orderBy(desc(installationSnapshots.id))
-      .all()
-      .find((item) => ['valid', 'applied', 'conflicted'].includes(item.state));
-    if (existing) return { snapshotId: existing.id, reused: true };
     const diagnostic = this.latestDiagnostic();
     if (
       !diagnostic ||
@@ -858,6 +843,23 @@ export class InstallationService {
     const result = JSON.parse(diagnostic.resultJson) as DiagnosticResult;
     if (!result.ready || !result.callbackUrl)
       throw new ServiceClientError('incompatible_response', 'Diagnostic is not ready');
+    const snapshots = this.database.db
+      .select()
+      .from(installationSnapshots)
+      .orderBy(desc(installationSnapshots.id))
+      .all();
+    const protectedSnapshot = snapshots.find((item) =>
+      ['applied', 'conflicted'].includes(item.state),
+    );
+    if (protectedSnapshot) return { snapshotId: protectedSnapshot.id, reused: true };
+    const existing = snapshots.find((item) => item.state === 'valid');
+    if (existing?.diagnosticId === diagnostic.id) return { snapshotId: existing.id, reused: true };
+    if (existing)
+      this.database.db
+        .update(installationSnapshots)
+        .set({ state: 'superseded' })
+        .where(eq(installationSnapshots.id, existing.id))
+        .run();
     const snapshot: SnapshotData = {
       selectedSeerrRadarrId: diagnostic.selectedSeerrRadarrId,
       originalPreventSearch: result.seerr.preventSearch ?? false,
@@ -882,8 +884,26 @@ export class InstallationService {
     try {
       const snapshotRow = this.latestSnapshot(true);
       const snapshot = JSON.parse(snapshotRow.snapshotJson) as SnapshotData;
+      const diagnostic = this.database.db
+        .select()
+        .from(installationDiagnostics)
+        .where(eq(installationDiagnostics.id, snapshotRow.diagnosticId))
+        .get();
+      if (!diagnostic || diagnostic.expiresAt.getTime() < Date.now())
+        throw new ServiceClientError(
+          'incompatible_response',
+          'The installation diagnostic expired; generate a new diagnostic and snapshot',
+        );
       const radarrConnection = this.requireConnection('radarr');
       const seerrConnection = this.requireConnection('seerr');
+      if (
+        diagnostic.radarrConnectionId !== radarrConnection.id ||
+        diagnostic.seerrConnectionId !== seerrConnection.id
+      )
+        throw new ServiceClientError(
+          'configuration_conflict',
+          'Active service connections changed after the installation snapshot',
+        );
       const radarr = this.clients.radarr(
         radarrConnection.baseUrl,
         this.secrets.get(radarrConnection.secretRef),
@@ -892,7 +912,22 @@ export class InstallationService {
         seerrConnection.baseUrl,
         this.secrets.get(seerrConnection.secretRef),
       );
-      let notifications = parseNotifications(await radarr.notifications());
+      const [status, notificationsRaw, instancesRaw] = await Promise.all([
+        radarr.status().then((value) => parseRadarrStatus(value)),
+        radarr.notifications(),
+        seerr.radarrSettings(),
+      ]);
+      let notifications = parseNotifications(notificationsRaw);
+      const instances = parseSeerrInstances(instancesRaw);
+      if (
+        snapshotRow.state === 'valid' &&
+        this.installationFingerprint(status, notifications, instances) !==
+          snapshotRow.configurationFingerprint
+      )
+        throw new ServiceClientError(
+          'configuration_conflict',
+          'Remote configuration changed after the installation snapshot',
+        );
       const initialClassification = classifyScorerrWebhook(
         notifications,
         snapshot.callbackUrl,
@@ -934,7 +969,6 @@ export class InstallationService {
         webhookResult = 'created';
         this.audit(operationId, 'create', 'radarr', 'notification', String(webhook.id), 'success');
       }
-      const instances = parseSeerrInstances(await seerr.radarrSettings());
       const selected = instances.find((item) => item.id === snapshot.selectedSeerrRadarrId);
       if (!selected)
         throw new ServiceClientError(
@@ -1180,6 +1214,21 @@ export class InstallationService {
     const writable = buildSeerrUpdate(instance, instance.preventSearch);
     delete writable.preventSearch;
     return sha256(JSON.stringify(writable));
+  }
+  private installationFingerprint(
+    status: { version: string; instanceName?: string },
+    notifications: ReturnType<typeof parseNotifications>,
+    instances: SeerrRadarrInstance[],
+  ): string {
+    return sha256(
+      JSON.stringify(
+        sanitize({
+          status,
+          notifications,
+          instances: instances.map((item) => ({ ...item, apiKey: undefined })),
+        }),
+      ),
+    );
   }
   private latestUnresolvedSeerrProbe() {
     return this.database.db

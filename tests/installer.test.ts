@@ -360,6 +360,30 @@ describe('scorerr installer', () => {
       ready: true,
     });
   });
+  it('creates a fresh snapshot for a newer diagnostic when the previous snapshot was never applied', async () => {
+    ctx = context();
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    const first = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/snapshot',
+      payload: {},
+    });
+    expect(first.json()).toMatchObject({ snapshotId: 1, reused: false });
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    const second = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/snapshot',
+      payload: {},
+    });
+    expect(second.json()).toMatchObject({ snapshotId: 2, reused: false });
+    expect(
+      ctx.database.sqlite.prepare('SELECT id, state FROM installation_snapshots ORDER BY id').all(),
+    ).toEqual([
+      { id: 1, state: 'superseded' },
+      { id: 2, state: 'valid' },
+    ]);
+  });
   it('applies in Radarr-then-Seerr order and is idempotent', async () => {
     ctx = context();
     await connect(ctx);
@@ -406,6 +430,95 @@ describe('scorerr installer', () => {
     });
     expect(ctx.state.instances[0]?.preventSearch).toBe(false);
     expect(ctx.state.deleted).toBe(1);
+  });
+  it('applies and rolls back Seerr while preserving a compatible preexisting webhook', async () => {
+    const state = initialState();
+    state.notifications = [
+      {
+        id: 55,
+        name: 'Existing Radarr webhook',
+        implementation: 'Webhook',
+        configContract: 'WebhookSettings',
+        onMovieAdded: true,
+        supportsOnMovieAdded: true,
+        onMovieFileDeleteForUpgrade: true,
+        fields: [{ name: 'url', value: 'http://scorerr:3000/api/webhooks/radarr' }],
+      },
+    ];
+    ctx = context({}, state);
+    await connect(ctx);
+    const diagnostic = await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    expect(diagnostic.json()).toMatchObject({
+      radarr: {
+        webhookState: 'preexisting_compatible_extra_triggers',
+        webhookPresent: true,
+      },
+      seerr: { preventSearch: false },
+    });
+    const snapshotResponse = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/snapshot',
+      payload: {},
+    });
+    expect(snapshotResponse.statusCode).toBe(200);
+    const snapshot = ctx.database.sqlite
+      .prepare('SELECT snapshot_json AS snapshotJson FROM installation_snapshots')
+      .get() as { snapshotJson: string };
+    expect(JSON.parse(snapshot.snapshotJson)).toMatchObject({
+      originalPreventSearch: false,
+      webhookPresent: true,
+    });
+
+    const applied = await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    expect(applied.json()).toMatchObject({
+      status: 'operational',
+      webhook: 'already_configured',
+      seerr: 'updated',
+    });
+    expect(ctx.state.created).toBe(0);
+    expect(ctx.state.instances[0]?.preventSearch).toBe(true);
+    expect(
+      ctx.database.sqlite.prepare('SELECT COUNT(*) AS count FROM managed_resources').get(),
+    ).toEqual({ count: 0 });
+
+    const rolledBack = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/rollback',
+      payload: {},
+    });
+    expect(rolledBack.json()).toMatchObject({
+      status: 'rolled_back',
+      seerr: 'restored',
+      webhook: 'not_owned',
+    });
+    expect(ctx.state.instances[0]?.preventSearch).toBe(false);
+    expect(ctx.state.deleted).toBe(0);
+    expect(ctx.state.notifications).toHaveLength(1);
+    expect(ctx.state.notifications[0]).toMatchObject({ id: 55, onMovieAdded: true });
+  });
+  it('refuses apply when its diagnostic expired', async () => {
+    ctx = context();
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/snapshot', payload: {} });
+    ctx.database.sqlite.prepare('UPDATE installation_diagnostics SET expires_at = ?').run(0);
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toMatchObject({ code: 'incompatible_response' });
+    expect(ctx.state.created).toBe(0);
+    expect(ctx.state.seerrUpdatePayloads).toHaveLength(0);
+  });
+  it('refuses apply when remote configuration changed after the snapshot', async () => {
+    ctx = context();
+    await connect(ctx);
+    await ctx.app.inject({ url: '/api/setup/diagnostic' });
+    await ctx.app.inject({ method: 'POST', url: '/api/setup/snapshot', payload: {} });
+    ctx.state.instances[0] = { ...ctx.state.instances[0], name: 'Changed after snapshot' };
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/setup/apply', payload: {} });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ code: 'configuration_conflict' });
+    expect(ctx.state.created).toBe(0);
+    expect(ctx.state.seerrUpdatePayloads).toHaveLength(0);
   });
   it('treats a manually deleted owned webhook as already removed', async () => {
     ctx = context();
