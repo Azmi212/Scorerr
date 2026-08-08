@@ -163,3 +163,21 @@ export const installationProbeReports = sqliteTable('installation_probe_reports'
   reportJson: text('report_json').notNull(),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
 });
+
+export const seerrPreventSearchProbes = sqliteTable(
+  'seerr_prevent_search_probes',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    seerrConnectionId: integer('seerr_connection_id').notNull(),
+    seerrRadarrId: integer('seerr_radarr_id').notNull(),
+    originalValue: integer('original_value', { mode: 'boolean' }).notNull(),
+    expectedConfigFingerprint: text('expected_config_fingerprint').notNull(),
+    state: text('state').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    testedAt: integer('tested_at', { mode: 'timestamp_ms' }),
+    restoredAt: integer('restored_at', { mode: 'timestamp_ms' }),
+    lastErrorCode: text('last_error_code'),
+    lastErrorMessage: text('last_error_message'),
+  },
+  (table) => [index('seerr_prevent_search_probes_state_index').on(table.state, table.id)],
+);

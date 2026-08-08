@@ -42,6 +42,10 @@ Avec `SETUP_WRITES_ENABLED=false`, `GET /api/setup/probe` fait exécuter par l'i
 
 La confirmation du test repose sur une nouvelle ligne `webhook_deliveries` de type `Test`, postérieure au lancement. Elle ne dépend pas de la création d'un nouvel événement métier : un payload de test déjà présent dans `events` reste dédupliqué tout en confirmant la nouvelle livraison HTTP. Les logs du receiver incluent `deliveryId`, `eventId` et `duplicate`, sans journaliser le payload.
 
+### Probe expérimental Seerr preventSearch
+
+`POST /api/setup/seerr/test-prevent-search` et `POST /api/setup/seerr/restore-prevent-search` sont exclusivement protégés par `SETUP_SEERR_PROBE_WRITE_ENABLED`. Ils exigent en plus que `SETUP_WRITES_ENABLED=false` et `SETUP_NON_PERSISTENT_TESTS_ENABLED=false`. Le premier relit l'instance sélectionnée, enregistre sa valeur originale et une empreinte des champs PUT supportés, change uniquement `preventSearch` vers `true`, puis vérifie par GET. Le second vérifie qu'aucun autre champ supporté n'a changé, restaure la valeur originale et vérifie le résultat. L'état de restauration est conservé dans `seerr_prevent_search_probes`.
+
 ## Fonctionnement actuel
 
 - `POST /api/webhooks/radarr` répond avec HTTP 202 à un JSON valide ;

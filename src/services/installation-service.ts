@@ -9,7 +9,12 @@ import {
   parseNotifications,
   parseRadarrStatus,
 } from '../adapters/radarr-adapter.js';
-import { buildSeerrUpdate, instanceUrl, parseSeerrInstances } from '../adapters/seerr-adapter.js';
+import {
+  buildSeerrUpdate,
+  instanceUrl,
+  parseSeerrInstances,
+  type SeerrRadarrInstance,
+} from '../adapters/seerr-adapter.js';
 import { RadarrClient } from '../clients/radarr-client.js';
 import { SeerrClient } from '../clients/seerr-client.js';
 import { normalizeServiceUrl, type HttpClientOptions } from '../clients/http-client.js';
@@ -22,6 +27,7 @@ import {
   installationProbeReports,
   installationSnapshots,
   managedResources,
+  seerrPreventSearchProbes,
   serviceConnections,
   webhookDeliveries,
 } from '../database/schema.js';
@@ -632,6 +638,205 @@ export class InstallationService {
     };
   }
 
+  async testSeerrPreventSearch(): Promise<Record<string, unknown>> {
+    this.assertSeerrProbeWriteEnabled();
+    const unresolved = this.latestUnresolvedSeerrProbe();
+    if (unresolved)
+      throw new ServiceClientError(
+        'configuration_conflict',
+        'A previous Seerr preventSearch probe must be restored first',
+      );
+    const operationId = this.startOperation('seerr-probe-test-prevent-search');
+    const { connection, instance, client } = await this.selectedSeerrInstance();
+    const originalValue = instance.preventSearch;
+    const fingerprint = this.seerrWritableFingerprint(instance);
+    const inserted = this.database.db
+      .insert(seerrPreventSearchProbes)
+      .values({
+        seerrConnectionId: connection.id,
+        seerrRadarrId: instance.id,
+        originalValue,
+        expectedConfigFingerprint: fingerprint,
+        state: originalValue ? 'already_true' : 'prepared',
+        createdAt: new Date(),
+      })
+      .run();
+    const probeId = Number(inserted.lastInsertRowid);
+    if (originalValue) {
+      const report = {
+        status: 'already_true',
+        probeId,
+        seerrRadarrId: instance.id,
+        originalPreventSearch: true,
+        currentPreventSearch: true,
+        writePerformed: false,
+      };
+      this.completeOperation(operationId, 'skipped', report);
+      return report;
+    }
+    const payload = buildSeerrUpdate(instance, true);
+    try {
+      await client.updateRadarr(instance.id, payload);
+    } catch (error) {
+      const safe = safeError(error);
+      this.updateSeerrProbeState(probeId, 'write_failed', safe);
+      this.completeOperation(operationId, 'failed', safe);
+      throw error;
+    }
+    const verified = parseSeerrInstances(await client.radarrSettings()).find(
+      (item) => item.id === instance.id,
+    );
+    const verifiedFingerprint = verified ? this.seerrWritableFingerprint(verified) : null;
+    if (verified?.preventSearch !== true || verifiedFingerprint !== fingerprint) {
+      const error = new ServiceClientError(
+        'incompatible_response',
+        'Seerr preventSearch probe verification failed',
+      );
+      const safe = safeError(error);
+      this.updateSeerrProbeState(probeId, 'verification_failed', safe);
+      this.completeOperation(operationId, 'failed', safe);
+      throw error;
+    }
+    this.database.db
+      .update(seerrPreventSearchProbes)
+      .set({ state: 'verified_true', testedAt: new Date() })
+      .where(eq(seerrPreventSearchProbes.id, probeId))
+      .run();
+    this.audit(
+      operationId,
+      'probe-update',
+      'seerr',
+      'radarr-instance-prevent-search',
+      String(instance.id),
+      'success',
+    );
+    const redacted = redactProbeData(payload);
+    const report = {
+      status: 'verified_true',
+      probeId,
+      endpoint: `PUT /api/v1/settings/radarr/${String(instance.id)}`,
+      seerrRadarrId: instance.id,
+      originalPreventSearch: false,
+      currentPreventSearch: true,
+      changedFields: ['preventSearch'],
+      payload: redacted.value,
+      redactedFields: redacted.sensitiveFields,
+      writePerformed: true,
+      verificationGetPerformed: true,
+    };
+    this.completeOperation(operationId, 'success', report);
+    return report;
+  }
+
+  async restoreSeerrPreventSearch(): Promise<Record<string, unknown>> {
+    this.assertSeerrProbeWriteEnabled();
+    const probe = this.latestUnresolvedSeerrProbe();
+    if (!probe)
+      throw new ServiceClientError(
+        'incompatible_response',
+        'No Seerr preventSearch probe is available to restore',
+      );
+    const operationId = this.startOperation('seerr-probe-restore-prevent-search');
+    const { connection, instance, client } = await this.selectedSeerrInstance(probe.seerrRadarrId);
+    if (connection.id !== probe.seerrConnectionId) {
+      const error = new ServiceClientError(
+        'configuration_conflict',
+        'The active Seerr connection changed after the probe',
+      );
+      this.updateSeerrProbeState(probe.id, 'conflict', safeError(error));
+      throw error;
+    }
+    if (this.seerrWritableFingerprint(instance) !== probe.expectedConfigFingerprint) {
+      const error = new ServiceClientError(
+        'configuration_conflict',
+        'Seerr configuration changed outside scorerr after the probe',
+      );
+      this.updateSeerrProbeState(probe.id, 'conflict', safeError(error));
+      this.completeOperation(operationId, 'conflict', safeError(error));
+      throw error;
+    }
+    if (instance.preventSearch === probe.originalValue) {
+      const report = {
+        status: probe.originalValue ? 'already_true' : 'already_restored',
+        probeId: probe.id,
+        originalPreventSearch: probe.originalValue,
+        currentPreventSearch: instance.preventSearch,
+        writePerformed: false,
+      };
+      this.database.db
+        .update(seerrPreventSearchProbes)
+        .set({ state: 'restored', restoredAt: new Date() })
+        .where(eq(seerrPreventSearchProbes.id, probe.id))
+        .run();
+      this.completeOperation(operationId, 'skipped', report);
+      return report;
+    }
+    if (!instance.preventSearch) {
+      const error = new ServiceClientError(
+        'configuration_conflict',
+        'Unexpected preventSearch value before restoration',
+      );
+      this.updateSeerrProbeState(probe.id, 'conflict', safeError(error));
+      this.completeOperation(operationId, 'conflict', safeError(error));
+      throw error;
+    }
+    const payload = buildSeerrUpdate(instance, probe.originalValue);
+    try {
+      await client.updateRadarr(instance.id, payload);
+    } catch (error) {
+      const safe = safeError(error);
+      this.updateSeerrProbeState(probe.id, 'restore_failed', safe);
+      this.completeOperation(operationId, 'failed', safe);
+      throw error;
+    }
+    const verified = parseSeerrInstances(await client.radarrSettings()).find(
+      (item) => item.id === instance.id,
+    );
+    const verifiedFingerprint = verified ? this.seerrWritableFingerprint(verified) : null;
+    if (
+      verified?.preventSearch !== probe.originalValue ||
+      verifiedFingerprint !== probe.expectedConfigFingerprint
+    ) {
+      const error = new ServiceClientError(
+        'incompatible_response',
+        'Seerr preventSearch restoration verification failed',
+      );
+      const safe = safeError(error);
+      this.updateSeerrProbeState(probe.id, 'restore_verification_failed', safe);
+      this.completeOperation(operationId, 'failed', safe);
+      throw error;
+    }
+    this.database.db
+      .update(seerrPreventSearchProbes)
+      .set({ state: 'restored', restoredAt: new Date() })
+      .where(eq(seerrPreventSearchProbes.id, probe.id))
+      .run();
+    this.audit(
+      operationId,
+      'probe-restore',
+      'seerr',
+      'radarr-instance-prevent-search',
+      String(instance.id),
+      'success',
+    );
+    const redacted = redactProbeData(payload);
+    const report = {
+      status: 'restored',
+      probeId: probe.id,
+      endpoint: `PUT /api/v1/settings/radarr/${String(instance.id)}`,
+      seerrRadarrId: instance.id,
+      originalPreventSearch: probe.originalValue,
+      currentPreventSearch: verified.preventSearch,
+      changedFields: ['preventSearch'],
+      payload: redacted.value,
+      redactedFields: redacted.sensitiveFields,
+      writePerformed: true,
+      verificationGetPerformed: true,
+    };
+    this.completeOperation(operationId, 'success', report);
+    return report;
+  }
+
   createSnapshot(): { snapshotId: number; reused: boolean } {
     const existing = this.database.db
       .select()
@@ -887,6 +1092,8 @@ export class InstallationService {
       .get();
     return {
       writesEnabled: this.config.SETUP_WRITES_ENABLED,
+      nonPersistentTestsEnabled: this.config.SETUP_NON_PERSISTENT_TESTS_ENABLED,
+      seerrProbeWriteEnabled: this.config.SETUP_SEERR_PROBE_WRITE_ENABLED,
       snapshotAvailable: Boolean(snapshot && snapshot.state !== 'rolled_back'),
       snapshotState: snapshot?.state ?? null,
       adminAuth: 'planned',
@@ -922,6 +1129,76 @@ export class InstallationService {
         .where(eq(serviceConnections.id, id))
         .get()?.version ?? null
     );
+  }
+  private assertSeerrProbeWriteEnabled(): void {
+    if (
+      !this.config.SETUP_SEERR_PROBE_WRITE_ENABLED ||
+      this.config.SETUP_WRITES_ENABLED ||
+      this.config.SETUP_NON_PERSISTENT_TESTS_ENABLED
+    )
+      throw new ServiceClientError(
+        'seerr_probe_write_disabled',
+        'The isolated Seerr preventSearch probe is disabled',
+      );
+  }
+  private async selectedSeerrInstance(requiredId?: number): Promise<{
+    connection: StoredConnection;
+    instance: SeerrRadarrInstance;
+    client: SeerrClient;
+  }> {
+    const connection = this.requireConnection('seerr');
+    const diagnostic = this.latestDiagnostic();
+    const selectedId = requiredId ?? diagnostic?.selectedSeerrRadarrId;
+    if (selectedId === null || selectedId === undefined)
+      throw new ServiceClientError(
+        'incompatible_response',
+        'A selected Seerr Radarr instance is required',
+      );
+    const client = this.clients.seerr(connection.baseUrl, this.secrets.get(connection.secretRef));
+    const instance = parseSeerrInstances(await client.radarrSettings()).find(
+      (item) => item.id === selectedId,
+    );
+    if (!instance)
+      throw new ServiceClientError(
+        'configuration_conflict',
+        'The selected Seerr Radarr instance no longer exists',
+      );
+    if (requiredId === undefined && diagnostic) {
+      const diagnosticResult = JSON.parse(diagnostic.resultJson) as DiagnosticResult;
+      const recorded = diagnosticResult.seerr.instances.find((item) => item.id === selectedId);
+      const identityMatches =
+        recorded?.name === instance.name && this.urlsMatch(recorded.url, instanceUrl(instance));
+      if (!identityMatches)
+        throw new ServiceClientError(
+          'configuration_conflict',
+          'The selected Seerr Radarr instance identity changed after diagnostic',
+        );
+    }
+    return { connection, instance, client };
+  }
+  private seerrWritableFingerprint(instance: SeerrRadarrInstance): string {
+    const writable = buildSeerrUpdate(instance, instance.preventSearch);
+    delete writable.preventSearch;
+    return sha256(JSON.stringify(writable));
+  }
+  private latestUnresolvedSeerrProbe() {
+    return this.database.db
+      .select()
+      .from(seerrPreventSearchProbes)
+      .orderBy(desc(seerrPreventSearchProbes.id))
+      .all()
+      .find((item) => item.state !== 'restored');
+  }
+  private updateSeerrProbeState(
+    id: number,
+    state: string,
+    error: { code: string; message: string },
+  ): void {
+    this.database.db
+      .update(seerrPreventSearchProbes)
+      .set({ state, lastErrorCode: error.code, lastErrorMessage: error.message })
+      .where(eq(seerrPreventSearchProbes.id, id))
+      .run();
   }
   private managedNotificationIds(): Set<number> {
     return new Set(

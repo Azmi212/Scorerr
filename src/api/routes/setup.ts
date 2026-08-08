@@ -29,6 +29,10 @@ export function registerSetupRoutes(app: FastifyInstance, service: InstallationS
   app.get('/api/setup/probe', async () => service.probe());
   app.get('/api/setup/apply-preview', async () => service.applyPreview());
   app.post('/api/setup/radarr/test-webhook', async () => service.testWebhook());
+  app.post('/api/setup/seerr/test-prevent-search', async () => service.testSeerrPreventSearch());
+  app.post('/api/setup/seerr/restore-prevent-search', async () =>
+    service.restoreSeerrPreventSearch(),
+  );
   app.put('/api/setup/seerr/radarr-selection', async (request, reply) => {
     const parsed = selectionSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid Radarr selection' });
@@ -49,7 +53,14 @@ export function registerSetupRoutes(app: FastifyInstance, service: InstallationS
         .send({ error: statusCode === 413 ? 'Payload too large' : 'Invalid request' });
     }
     const safe = safeError(error);
-    const status = safe.code === 'writes_disabled' ? 409 : safe.code === 'unauthorized' ? 401 : 422;
+    const status =
+      safe.code === 'seerr_probe_write_disabled'
+        ? 403
+        : safe.code === 'writes_disabled' || safe.code === 'configuration_conflict'
+          ? 409
+          : safe.code === 'unauthorized'
+            ? 401
+            : 422;
     return reply.code(status).send({ error: safe.message, code: safe.code });
   });
 }

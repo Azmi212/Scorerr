@@ -45,6 +45,10 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+  SETUP_SEERR_PROBE_WRITE_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   WORKER_SCHEMA_WAIT_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   WORKER_LOCK_TIMEOUT_MS: z.coerce

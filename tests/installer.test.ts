@@ -61,6 +61,10 @@ interface State {
   deleted: number;
   schemaMissing?: boolean;
   onTestNotification?: () => void;
+  seerrPutError?: boolean;
+  seerrIgnoreUpdate?: boolean;
+  seerrSettingsReads: number;
+  seerrUpdatePayloads: Record<string, unknown>[];
 }
 
 function initialState(): State {
@@ -84,6 +88,8 @@ function initialState(): State {
     ],
     created: 0,
     deleted: 0,
+    seerrSettingsReads: 0,
+    seerrUpdatePayloads: [],
   };
 }
 
@@ -125,6 +131,7 @@ function factory(state: State): ClientFactory {
     seerr: (_url, key) =>
       ({
         radarrSettings: async () => {
+          state.seerrSettingsReads++;
           if (key !== state.seerrKey)
             throw Object.assign(new Error('bad key'), {
               code: 'unauthorized',
@@ -135,8 +142,12 @@ function factory(state: State): ClientFactory {
         publicSettings: async () => ({ version: '2.4.0' }),
         status: async () => ({ version: '2.7.3' }),
         updateRadarr: async (id: number, payload: unknown) => {
+          if (state.seerrPutError)
+            throw new ServiceClientError('incompatible_response', 'Simulated Seerr PUT failure');
+          state.seerrUpdatePayloads.push(payload as Record<string, unknown>);
           const current = state.instances.find((item) => item.id === id);
           if (!current) throw new Error('missing');
+          if (state.seerrIgnoreUpdate) return current;
           state.instances = state.instances.map((item) =>
             item.id === id ? { ...item, ...(payload as object) } : item,
           );
@@ -171,6 +182,7 @@ function context(overrides: Partial<AppConfig> = {}, state = initialState()): Se
     SETUP_DIAGNOSTIC_TTL_MS: 300_000,
     SETUP_WRITES_ENABLED: true,
     SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
+    SETUP_SEERR_PROBE_WRITE_ENABLED: false,
     WORKER_POLL_INTERVAL_MS: 100,
     WORKER_SCHEMA_WAIT_INTERVAL_MS: 100,
     WORKER_LOCK_TIMEOUT_MS: 300_000,
@@ -207,6 +219,13 @@ async function connect(ctx: SetupContext): Promise<void> {
     expect(response.statusCode).toBe(200);
     expect(response.body).not.toContain(apiKey);
   }
+}
+
+async function prepareSelectedSeerr(ctx: SetupContext): Promise<void> {
+  await connect(ctx);
+  const diagnostic = await ctx.app.inject({ method: 'GET', url: '/api/setup/diagnostic' });
+  expect(diagnostic.statusCode).toBe(200);
+  expect(diagnostic.json()).toMatchObject({ seerr: { selectedRadarrId: 4 } });
 }
 
 describe('scorerr installer', () => {
@@ -489,6 +508,170 @@ describe('scorerr installer', () => {
     });
     expect(response.statusCode).toBe(422);
     expect(response.json()).toMatchObject({ code: 'non_persistent_tests_disabled' });
+  });
+  it('refuses the Seerr write probe with HTTP 403 while its dedicated lock is disabled', async () => {
+    ctx = context({
+      SETUP_WRITES_ENABLED: false,
+      SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
+      SETUP_SEERR_PROBE_WRITE_ENABLED: false,
+    });
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/test-prevent-search',
+      payload: {},
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ code: 'seerr_probe_write_disabled' });
+    expect(ctx.state.seerrUpdatePayloads).toHaveLength(0);
+  });
+  it('changes only preventSearch from false to true, verifies it, then restores it', async () => {
+    ctx = context({
+      SETUP_WRITES_ENABLED: false,
+      SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
+      SETUP_SEERR_PROBE_WRITE_ENABLED: true,
+    });
+    ctx.state.instances[0] = {
+      ...ctx.state.instances[0],
+      activeProfileId: 6,
+      activeProfileName: 'HD',
+      activeDirectory: '/movies',
+      minimumAvailability: 'released',
+      isDefault: true,
+      externalUrl: 'https://radarr.example',
+      syncEnabled: true,
+      tags: [1, 2],
+      tagRequests: true,
+    };
+    await prepareSelectedSeerr(ctx);
+    const before = structuredClone(ctx.state.instances[0]);
+    const readsBeforeTest = ctx.state.seerrSettingsReads;
+    const tested = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/test-prevent-search',
+      payload: {},
+    });
+    expect(tested.statusCode).toBe(200);
+    expect(tested.json()).toMatchObject({
+      status: 'verified_true',
+      originalPreventSearch: false,
+      currentPreventSearch: true,
+      changedFields: ['preventSearch'],
+      writePerformed: true,
+      verificationGetPerformed: true,
+    });
+    expect(ctx.state.seerrSettingsReads - readsBeforeTest).toBe(2);
+    expect(ctx.state.seerrUpdatePayloads).toHaveLength(1);
+    expect(ctx.state.seerrUpdatePayloads[0]).not.toHaveProperty('tags');
+    expect(ctx.state.seerrUpdatePayloads[0]).not.toHaveProperty('tagRequests');
+    expect(ctx.state.instances[0]).toEqual({ ...before, preventSearch: true });
+    expect(tested.body).not.toContain('nested-radarr-secret');
+
+    const restored = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/restore-prevent-search',
+      payload: {},
+    });
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json()).toMatchObject({
+      status: 'restored',
+      originalPreventSearch: false,
+      currentPreventSearch: false,
+      changedFields: ['preventSearch'],
+    });
+    expect(ctx.state.instances[0]).toEqual(before);
+    expect(ctx.state.seerrUpdatePayloads).toHaveLength(2);
+    expect(restored.body).not.toContain('nested-radarr-secret');
+    const auditAndReports = JSON.stringify({
+      audit: ctx.database.sqlite.prepare('SELECT * FROM installation_audit_log').all(),
+      operations: ctx.database.sqlite.prepare('SELECT * FROM installation_operations').all(),
+      probes: ctx.database.sqlite.prepare('SELECT * FROM seerr_prevent_search_probes').all(),
+    });
+    expect(auditAndReports).not.toContain('nested-radarr-secret');
+  });
+  it('returns already_true without sending a Seerr PUT', async () => {
+    const state = initialState();
+    state.instances[0] = { ...state.instances[0], preventSearch: true };
+    ctx = context(
+      {
+        SETUP_WRITES_ENABLED: false,
+        SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
+        SETUP_SEERR_PROBE_WRITE_ENABLED: true,
+      },
+      state,
+    );
+    await prepareSelectedSeerr(ctx);
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/test-prevent-search',
+      payload: {},
+    });
+    expect(response.json()).toMatchObject({ status: 'already_true', writePerformed: false });
+    expect(ctx.state.seerrUpdatePayloads).toHaveLength(0);
+  });
+  it('refuses restoration when another supported Seerr value changed', async () => {
+    ctx = context({
+      SETUP_WRITES_ENABLED: false,
+      SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
+      SETUP_SEERR_PROBE_WRITE_ENABLED: true,
+    });
+    await prepareSelectedSeerr(ctx);
+    await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/test-prevent-search',
+      payload: {},
+    });
+    ctx.state.instances[0] = { ...ctx.state.instances[0], name: 'Changed manually' };
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/restore-prevent-search',
+      payload: {},
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ code: 'configuration_conflict' });
+    expect(ctx.state.seerrUpdatePayloads).toHaveLength(1);
+    expect(ctx.state.instances[0].preventSearch).toBe(true);
+  });
+  it('reports a Seerr PUT error without leaking secrets', async () => {
+    const state = initialState();
+    state.seerrPutError = true;
+    ctx = context(
+      {
+        SETUP_WRITES_ENABLED: false,
+        SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
+        SETUP_SEERR_PROBE_WRITE_ENABLED: true,
+      },
+      state,
+    );
+    await prepareSelectedSeerr(ctx);
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/test-prevent-search',
+      payload: {},
+    });
+    expect(response.statusCode).toBe(422);
+    expect(response.body).not.toContain('nested-radarr-secret');
+    expect(ctx.state.instances[0]?.preventSearch).toBe(false);
+  });
+  it('reports an error when the Seerr verification GET does not show the update', async () => {
+    const state = initialState();
+    state.seerrIgnoreUpdate = true;
+    ctx = context(
+      {
+        SETUP_WRITES_ENABLED: false,
+        SETUP_NON_PERSISTENT_TESTS_ENABLED: false,
+        SETUP_SEERR_PROBE_WRITE_ENABLED: true,
+      },
+      state,
+    );
+    await prepareSelectedSeerr(ctx);
+    const response = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/setup/seerr/test-prevent-search',
+      payload: {},
+    });
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toMatchObject({ code: 'incompatible_response' });
+    expect(ctx.state.seerrSettingsReads).toBeGreaterThanOrEqual(3);
   });
   it('confirms a new duplicate Test delivery without requiring a new business event', async () => {
     ctx = context({

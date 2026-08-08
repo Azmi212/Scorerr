@@ -32,6 +32,8 @@ export class ServiceClientError extends Error {
       | 'response_too_large'
       | 'not_found'
       | 'non_persistent_tests_disabled'
+      | 'seerr_probe_write_disabled'
+      | 'configuration_conflict'
       | 'writes_disabled',
     public readonly safeMessage: string,
     public readonly httpStatus?: number,
