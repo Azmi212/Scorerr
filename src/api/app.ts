@@ -5,20 +5,24 @@ import type { DatabaseContext } from '../database/client.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerWebhookRoutes } from './routes/radarr-webhook.js';
+import { registerReleaseProbeRoutes } from './routes/release-probe.js';
 import { registerSetupRoutes } from './routes/setup.js';
 import { SqliteSecretStore } from '../security/secret-store.js';
 import { InstallationService } from '../services/installation-service.js';
+import { ReleaseProbeService } from '../services/release-probe-service.js';
 
 export interface AppDependencies {
   config: AppConfig;
   database: DatabaseContext;
   installationService?: InstallationService;
+  releaseProbeService?: ReleaseProbeService;
 }
 
 export function buildApp({
   config,
   database,
   installationService,
+  releaseProbeService,
 }: AppDependencies): FastifyInstance {
   const app = Fastify({
     logger:
@@ -52,13 +56,17 @@ export function buildApp({
   registerHealthRoutes(app, database);
   registerWebhookRoutes(app, database);
   registerEventRoutes(app, database);
+  const secretStore = new SqliteSecretStore(
+    database,
+    config.DATABASE_PATH,
+    config.SCORERR_MASTER_KEY,
+  );
   const setupService =
-    installationService ??
-    new InstallationService(
-      database,
-      config,
-      new SqliteSecretStore(database, config.DATABASE_PATH, config.SCORERR_MASTER_KEY),
-    );
+    installationService ?? new InstallationService(database, config, secretStore);
   registerSetupRoutes(app, setupService);
+  registerReleaseProbeRoutes(
+    app,
+    releaseProbeService ?? new ReleaseProbeService(database, config, secretStore),
+  );
   return app;
 }

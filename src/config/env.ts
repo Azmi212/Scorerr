@@ -49,6 +49,22 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+  RELEASE_PROBE_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  RELEASE_PROBE_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(10 * 60 * 1000)
+    .default(120_000),
+  RELEASE_PROBE_COOLDOWN_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(60 * 60 * 1000)
+    .default(30_000),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   WORKER_SCHEMA_WAIT_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   WORKER_LOCK_TIMEOUT_MS: z.coerce

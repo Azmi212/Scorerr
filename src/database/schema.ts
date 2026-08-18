@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const events = sqliteTable(
@@ -180,4 +181,45 @@ export const seerrPreventSearchProbes = sqliteTable(
     lastErrorMessage: text('last_error_message'),
   },
   (table) => [index('seerr_prevent_search_probes_state_index').on(table.state, table.id)],
+);
+
+export const releaseProbes = sqliteTable(
+  'release_probes',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    movieId: integer('movie_id').notNull(),
+    movieTitle: text('movie_title'),
+    radarrVersion: text('radarr_version'),
+    startedAt: integer('started_at', { mode: 'timestamp_ms' }).notNull(),
+    completedAt: integer('completed_at', { mode: 'timestamp_ms' }),
+    durationMs: integer('duration_ms'),
+    status: text('status').notNull(),
+    releaseCount: integer('release_count').notNull().default(0),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    summaryJson: text('summary_json'),
+  },
+  (table) => [
+    index('release_probes_movie_started_index').on(table.movieId, table.startedAt),
+    uniqueIndex('release_probes_one_searching_movie_unique')
+      .on(table.movieId)
+      .where(sql`${table.status} = 'searching'`),
+  ],
+);
+
+export const releaseProbeItems = sqliteTable(
+  'release_probe_items',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    probeId: integer('probe_id')
+      .notNull()
+      .references(() => releaseProbes.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    normalizedJson: text('normalized_json').notNull(),
+    rawRedactedJson: text('raw_redacted_json').notNull(),
+  },
+  (table) => [
+    uniqueIndex('release_probe_items_probe_ordinal_unique').on(table.probeId, table.ordinal),
+  ],
 );

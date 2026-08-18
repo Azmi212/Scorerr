@@ -54,13 +54,19 @@ export function registerSetupRoutes(app: FastifyInstance, service: InstallationS
     }
     const safe = safeError(error);
     const status =
-      safe.code === 'seerr_probe_write_disabled'
+      safe.code === 'seerr_probe_write_disabled' || safe.code === 'release_probe_disabled'
         ? 403
-        : safe.code === 'writes_disabled' || safe.code === 'configuration_conflict'
-          ? 409
-          : safe.code === 'unauthorized'
-            ? 401
-            : 422;
+        : safe.code === 'release_probe_cooldown'
+          ? 429
+          : safe.code === 'not_found'
+            ? 404
+            : safe.code === 'writes_disabled' ||
+                safe.code === 'configuration_conflict' ||
+                safe.code === 'release_probe_conflict'
+              ? 409
+              : safe.code === 'unauthorized'
+                ? 401
+                : 422;
     return reply.code(status).send({ error: safe.message, code: safe.code });
   });
 }

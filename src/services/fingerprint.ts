@@ -12,6 +12,10 @@ function normalizeValue(value: unknown): unknown {
   return value;
 }
 
+export function normalizeJson(value: unknown): unknown {
+  return normalizeValue(value);
+}
+
 export function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }

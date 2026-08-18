@@ -34,6 +34,9 @@ export class ServiceClientError extends Error {
       | 'non_persistent_tests_disabled'
       | 'seerr_probe_write_disabled'
       | 'configuration_conflict'
+      | 'release_probe_disabled'
+      | 'release_probe_conflict'
+      | 'release_probe_cooldown'
       | 'writes_disabled',
     public readonly safeMessage: string,
     public readonly httpStatus?: number,

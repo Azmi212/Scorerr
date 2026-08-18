@@ -2,6 +2,29 @@
 
 `scorerr` comprend désormais **scorerr installer** en plus de l'Integration Probe. L'installer prépare les connexions Radarr et Seerr, diagnostique `preventSearch` et la notification MovieAdded, puis fournit un apply/rollback vérifiable. Aucun moteur de scoring, grab ou téléchargement n'est présent.
 
+## Phase 3 : Release Probe
+
+Release Probe observe manuellement le contrat des releases retournées par la recherche interactive Radarr. Il n'est relié ni au receiver `MovieAdded` ni au worker et ne contient aucune méthode de grab ou de téléchargement.
+
+Le verrou est désactivé par défaut :
+
+```dotenv
+RELEASE_PROBE_ENABLED=false
+RELEASE_PROBE_TIMEOUT_MS=120000
+RELEASE_PROBE_COOLDOWN_MS=30000
+```
+
+Lorsqu'il est explicitement activé, `POST /api/probe/releases/:movieId` effectue exclusivement :
+
+```text
+GET /api/v3/movie/:movieId
+GET /api/v3/release?movieId=:movieId
+```
+
+Le premier appel valide le film. Le second lance la recherche interactive susceptible de solliciter les indexeurs. Deux recherches concurrentes du même film sont refusées et le cooldown évite les répétitions accidentelles. Les résultats sont conservés dans `release_probes` et `release_probe_items`, après redaction des URLs et champs sensibles.
+
+`GET /api/probe/releases/:probeId` relit un rapport enregistré. La page minimale `/probe/releases` permet de saisir un `movieId` et affiche les principales valeurs brutes. Les rapports inventorient les champs toujours/parfois présents, les champs attendus jamais observés, les types, protocoles et statistiques disponibles sans supposer que `seeders` existe pour toutes les releases. Les textes de rejet sont conservés uniquement pour diagnostic et ne sont pas parsés comme règles métier.
+
 > Les écritures distantes restent verrouillées par défaut (`SETUP_WRITES_ENABLED=false`) jusqu'à validation des contrats lors d'un probe réel en lecture seule.
 
 ## Utiliser scorerr installer

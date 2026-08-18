@@ -1,5 +1,5 @@
 const sensitiveName =
-  /api[-_]?key|password|secret|token|authorization|credential|username|headers?|cookies?/i;
+  /api[-_]?key|password|passkey|secret|token|authkey|authorization|credential|username|headers?|cookies?/i;
 
 export interface RedactedProbeData {
   value: unknown;
@@ -21,7 +21,7 @@ function redactUrl(value: string, path: string, detected: Set<string>): string {
         url.searchParams.set(key, '[REDACTED]');
       }
     }
-    return url.toString();
+    return url.toString().replaceAll('%5BREDACTED%5D', '[REDACTED]');
   } catch {
     return value;
   }

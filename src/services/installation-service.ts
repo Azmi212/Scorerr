@@ -1128,6 +1128,7 @@ export class InstallationService {
       writesEnabled: this.config.SETUP_WRITES_ENABLED,
       nonPersistentTestsEnabled: this.config.SETUP_NON_PERSISTENT_TESTS_ENABLED,
       seerrProbeWriteEnabled: this.config.SETUP_SEERR_PROBE_WRITE_ENABLED,
+      releaseProbeEnabled: this.config.RELEASE_PROBE_ENABLED,
       snapshotAvailable: Boolean(snapshot && snapshot.state !== 'rolled_back'),
       snapshotState: snapshot?.state ?? null,
       adminAuth: 'planned',
