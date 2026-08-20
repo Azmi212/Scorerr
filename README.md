@@ -25,6 +25,8 @@ Le premier appel valide le film. Le second lance la recherche interactive suscep
 
 `GET /api/probe/releases/:probeId` relit un rapport enregistré. La page minimale `/probe/releases` permet de saisir un `movieId` et affiche les principales valeurs brutes. Les rapports inventorient les champs toujours/parfois présents, les champs attendus jamais observés, les types, protocoles et statistiques disponibles sans supposer que `seeders` existe pour toutes les releases. Les textes de rejet sont conservés uniquement pour diagnostic et ne sont pas parsés comme règles métier.
 
+La relecture `GET /api/probe/releases/:probeId/comparison` relève exclusivement de la Phase 3B diagnostique : elle trie les releases éligibles par seeders observés et ne constitue ni le classement produit de scorerr ni une sélection finale. L'observation logarithmique de disponibilité Torrent est expérimentale, n'est jamais appliquée à Usenet et ne définit aucune formule de scoring.
+
 > Les écritures distantes restent verrouillées par défaut (`SETUP_WRITES_ENABLED=false`) jusqu'à validation des contrats lors d'un probe réel en lecture seule.
 
 ## Utiliser scorerr installer

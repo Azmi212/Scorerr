@@ -27,4 +27,9 @@ export function registerReleaseProbeRoutes(
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid probeId' });
     return service.get(parsed.data.probeId);
   });
+  app.get('/api/probe/releases/:probeId/comparison', (request, reply) => {
+    const parsed = probeParamsSchema.safeParse(request.params);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid probeId' });
+    return service.comparison(parsed.data.probeId);
+  });
 }

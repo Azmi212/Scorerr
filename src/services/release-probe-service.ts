@@ -9,7 +9,13 @@ import { releaseProbeItems, releaseProbes, serviceConnections } from '../databas
 import { redactProbeData } from '../security/probe-redaction.js';
 import { safeError, ServiceClientError } from '../security/redaction.js';
 import type { SecretStore } from '../security/secret-store.js';
-import { fingerprintEvent, normalizeJson } from './fingerprint.js';
+import {
+  normalizeRelease,
+  releaseProbeDiagnosticScope,
+  releaseComparison,
+  summarizeNormalizedReleases,
+  type NormalizedRelease,
+} from './release-normalizer.js';
 
 const movieSchema = z.object({ id: z.number().int(), title: z.string() }).loose();
 const releasesSchema = z.array(z.record(z.string(), z.unknown()));
@@ -160,17 +166,21 @@ export class ReleaseProbeService {
       const redactedItems = releasesParsed.data.map(
         (release) => redactProbeData(release).value as Record<string, unknown>,
       );
-      const summary = this.summarize(redactedItems);
+      const normalizedItems = redactedItems.map(normalizeRelease);
+      const summary = {
+        ...this.summarize(redactedItems),
+        ...summarizeNormalizedReleases(normalizedItems),
+      };
       const completedAt = new Date();
       this.database.sqlite.transaction(() => {
-        for (const [ordinal, item] of redactedItems.entries()) {
-          const normalized = normalizeJson(item);
+        for (const [ordinal, normalized] of normalizedItems.entries()) {
+          const item = redactedItems[ordinal] ?? {};
           this.database.db
             .insert(releaseProbeItems)
             .values({
               probeId,
               ordinal,
-              fingerprint: fingerprintEvent(normalized),
+              fingerprint: normalized.identity.fingerprint,
               normalizedJson: JSON.stringify(normalized),
               rawRedactedJson: JSON.stringify(item),
             })
@@ -215,13 +225,22 @@ export class ReleaseProbeService {
       .where(eq(releaseProbes.id, probeId))
       .get();
     if (!probe) throw new ServiceClientError('not_found', 'Release probe was not found');
-    const releases = this.database.db
-      .select({ ordinal: releaseProbeItems.ordinal, raw: releaseProbeItems.rawRedactedJson })
+    const items = this.database.db
+      .select({
+        ordinal: releaseProbeItems.ordinal,
+        raw: releaseProbeItems.rawRedactedJson,
+        normalized: releaseProbeItems.normalizedJson,
+      })
       .from(releaseProbeItems)
       .where(eq(releaseProbeItems.probeId, probeId))
       .orderBy(releaseProbeItems.ordinal)
-      .all()
-      .map((item) => JSON.parse(item.raw) as unknown);
+      .all();
+    const releases = items.map((item) => JSON.parse(item.raw) as Record<string, unknown>);
+    const normalizedReleases = items.map((item) => {
+      const parsed = JSON.parse(item.normalized) as unknown;
+      const raw = JSON.parse(item.raw) as Record<string, unknown>;
+      return isNormalizedRelease(parsed) ? parsed : normalizeRelease(raw);
+    });
     return {
       id: probe.id,
       status: probe.status,
@@ -233,6 +252,20 @@ export class ReleaseProbeService {
       releaseCount: probe.releaseCount,
       error: probe.errorCode ? { code: probe.errorCode, message: probe.errorMessage } : null,
       ...(probe.summaryJson ? (JSON.parse(probe.summaryJson) as Record<string, unknown>) : {}),
+      ...summarizeNormalizedReleases(normalizedReleases),
+      normalizedReleases,
+      releases,
+    };
+  }
+
+  comparison(probeId: number): Record<string, unknown> {
+    const report = this.get(probeId) as { normalizedReleases: NormalizedRelease[] };
+    const releases = releaseComparison(report.normalizedReleases);
+    return {
+      probeId,
+      diagnostic: releaseProbeDiagnosticScope,
+      diagnosticSort: 'seeders_desc',
+      releaseCount: releases.length,
       releases,
     };
   }
@@ -291,4 +324,10 @@ export class ReleaseProbeService {
       },
     };
   }
+}
+
+function isNormalizedRelease(value: unknown): value is NormalizedRelease {
+  if (value === null || typeof value !== 'object') return false;
+  const candidate = value as Partial<NormalizedRelease>;
+  return candidate.identity !== undefined && candidate.eligibility !== undefined;
 }

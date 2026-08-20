@@ -367,6 +367,57 @@ describe('Release Probe API', () => {
     expect(context.state.calls.join(' ')).not.toMatch(/grab|download|command|POST|PUT|DELETE/i);
   });
 
+  it('returns an eligible-only diagnostic comparison without making a new remote call', async () => {
+    context = createReleaseContext(
+      {},
+      {
+        releases: [
+          { title: 'Valid low', protocol: 'torrent', seeders: 2, approved: true, rejected: false },
+          {
+            title: 'Wrong high',
+            protocol: 'torrent',
+            seeders: 500,
+            approved: false,
+            rejected: true,
+          },
+          {
+            title: 'Valid high',
+            protocol: 'torrent',
+            seeders: 10,
+            approved: true,
+            rejected: false,
+          },
+        ],
+      },
+    );
+    const created = await context.app.inject({
+      method: 'POST',
+      url: '/api/probe/releases/42',
+      payload: {},
+    });
+    const probeId = created.json<{ id: number }>().id;
+    const calls = [...context.state.calls];
+    expect(calls).toEqual(['GET /api/v3/movie/42', 'GET /api/v3/release?movieId=42']);
+    const response = await context.app.inject({
+      method: 'GET',
+      url: `/api/probe/releases/${String(probeId)}/comparison`,
+    });
+    expect(response.json()).toMatchObject({
+      diagnostic: {
+        mode: 'phase_3b_diagnostic',
+        producesFinalRanking: false,
+        scoringPolicy: 'not_implemented',
+      },
+      diagnosticSort: 'seeders_desc',
+      releaseCount: 2,
+      releases: [
+        { title: 'Valid high', seeders: 10 },
+        { title: 'Valid low', seeders: 2 },
+      ],
+    });
+    expect(context.state.calls).toEqual(calls);
+  });
+
   it('serves the minimal manual Release Probe page', async () => {
     context = createReleaseContext();
     const response = await context.app.inject({ method: 'GET', url: '/probe/releases' });
