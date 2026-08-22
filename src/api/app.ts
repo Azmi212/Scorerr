@@ -6,15 +6,18 @@ import { registerEventRoutes } from './routes/events.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerWebhookRoutes } from './routes/radarr-webhook.js';
 import { registerReleaseProbeRoutes } from './routes/release-probe.js';
+import { registerProfileRoutes } from './routes/profiles.js';
 import { registerSetupRoutes } from './routes/setup.js';
 import { SqliteSecretStore } from '../security/secret-store.js';
 import { InstallationService } from '../services/installation-service.js';
+import { ProfileService } from '../services/profile-service.js';
 import { ReleaseProbeService } from '../services/release-probe-service.js';
 
 export interface AppDependencies {
   config: AppConfig;
   database: DatabaseContext;
   installationService?: InstallationService;
+  profileService?: ProfileService;
   releaseProbeService?: ReleaseProbeService;
 }
 
@@ -22,6 +25,7 @@ export function buildApp({
   config,
   database,
   installationService,
+  profileService,
   releaseProbeService,
 }: AppDependencies): FastifyInstance {
   const app = Fastify({
@@ -68,5 +72,6 @@ export function buildApp({
     app,
     releaseProbeService ?? new ReleaseProbeService(database, config, secretStore),
   );
+  registerProfileRoutes(app, profileService ?? new ProfileService(database));
   return app;
 }

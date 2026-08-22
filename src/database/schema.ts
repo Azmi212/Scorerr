@@ -223,3 +223,45 @@ export const releaseProbeItems = sqliteTable(
     uniqueIndex('release_probe_items_probe_ordinal_unique').on(table.probeId, table.ordinal),
   ],
 );
+
+export const profiles = sqliteTable('profiles', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  name: text('name').notNull(),
+  description: text('description'),
+  schemaVersion: integer('schema_version').notNull(),
+  revision: integer('revision').notNull(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+});
+
+export const profileRules = sqliteTable(
+  'profile_rules',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    profileId: integer('profile_id')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    type: text('type', {
+      enum: [
+        'language',
+        'seeders',
+        'resolution',
+        'source',
+        'size',
+        'codec',
+        'custom_formats',
+        'indexer',
+      ],
+    }).notNull(),
+    position: integer('position').notNull(),
+    configVersion: integer('config_version').notNull(),
+    configJson: text('config_json').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('profile_rules_profile_type_unique').on(table.profileId, table.type),
+    uniqueIndex('profile_rules_profile_position_unique').on(table.profileId, table.position),
+    index('profile_rules_profile_position_index').on(table.profileId, table.position),
+  ],
+);
