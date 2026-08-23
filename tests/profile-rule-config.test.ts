@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   profileRuleInputSchema,
   replaceProfileRulesRequestSchema,
+  storedProfileRuleInputSchema,
 } from '../src/services/profile-service.js';
 
 function validRules(): unknown[] {
@@ -10,8 +11,8 @@ function validRules(): unknown[] {
     {
       type: 'language',
       position: 0,
-      configVersion: 1,
-      config: { preferredLanguages: ['fr', 'en'], fallback: 'original' },
+      configVersion: 2,
+      config: { importance: 'high', preferredLanguages: ['fr', 'en'], fallback: 'original' },
     },
     {
       type: 'seeders',
@@ -73,16 +74,33 @@ describe('Profile rule configuration schemas', () => {
       expect(profileRuleInputSchema.safeParse(rule).success).toBe(true);
   });
 
-  it('preserves preferred language order and requires the original-version fallback', () => {
+  it('requires Language V2 with an explicit importance for new writes', () => {
     const rule = validRules()[0];
     const parsed = profileRuleInputSchema.parse(rule);
     expect(parsed).toMatchObject({
-      config: { preferredLanguages: ['fr', 'en'], fallback: 'original' },
+      config: { importance: 'high', preferredLanguages: ['fr', 'en'], fallback: 'original' },
     });
     expect(
       profileRuleInputSchema.safeParse({
         ...parsed,
-        config: { preferredLanguages: ['fr'], fallback: 'translated' },
+        config: { importance: 'high', preferredLanguages: ['fr'], fallback: 'translated' },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts legacy Language V1 only while reading persisted rules', () => {
+    const languageV1 = {
+      type: 'language',
+      position: 0,
+      configVersion: 1,
+      config: { preferredLanguages: ['fr', 'en'], fallback: 'original' },
+    };
+
+    expect(storedProfileRuleInputSchema.safeParse(languageV1).success).toBe(true);
+    expect(profileRuleInputSchema.safeParse(languageV1).success).toBe(false);
+    expect(
+      replaceProfileRulesRequestSchema.safeParse({
+        rules: [languageV1, ...validRules().slice(1)],
       }).success,
     ).toBe(false);
   });
@@ -127,7 +145,7 @@ describe('Profile rule configuration schemas', () => {
     ).toBe(false);
   });
 
-  it('stores size in bytes and rejects UI-only units or unknown config versions', () => {
+  it('keeps the seven non-language rule configurations at version 1', () => {
     const rules = validRules() as {
       type: string;
       position: number;
@@ -142,7 +160,10 @@ describe('Profile rule configuration schemas', () => {
         config: { ...size.config, desiredMaximumGiB: 10 },
       }).success,
     ).toBe(false);
-    expect(profileRuleInputSchema.safeParse({ ...size, configVersion: 2 }).success).toBe(false);
+    for (const rule of rules.filter((rule) => rule.type !== 'language')) {
+      expect(rule.configVersion).toBe(1);
+      expect(profileRuleInputSchema.safeParse({ ...rule, configVersion: 2 }).success).toBe(false);
+    }
   });
 
   it('requires one ordered instance of every rule type and unique positions', () => {

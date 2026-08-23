@@ -1,7 +1,8 @@
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { profileRules, serviceConnections } from '../src/database/schema.js';
+import { profileRules, profiles, serviceConnections } from '../src/database/schema.js';
+import { profileRuleTypes, type ProfileRuleType } from '../src/services/profile-service.js';
 import { createTestContext, type TestContext } from './helpers.js';
 
 interface ProfileResponse {
@@ -28,8 +29,8 @@ function profilePayload(): Record<string, unknown> {
       {
         type: 'language',
         position: 0,
-        configVersion: 1,
-        config: { preferredLanguages: ['fr', 'en'], fallback: 'original' },
+        configVersion: 2,
+        config: { importance: 'high', preferredLanguages: ['fr', 'en'], fallback: 'original' },
       },
       {
         type: 'seeders',
@@ -120,6 +121,92 @@ function insertServiceConnection(context: TestContext, service: 'radarr' | 'seer
   return Number(result.lastInsertRowid);
 }
 
+function isProfileRuleType(value: unknown): value is ProfileRuleType {
+  return typeof value === 'string' && profileRuleTypes.includes(value as ProfileRuleType);
+}
+
+function legacyLanguageRules(): Record<string, unknown>[] {
+  const rules = structuredClone(rulesFrom(profilePayload()));
+  const language = rules.find((rule) => rule.type === 'language');
+  if (!language) throw new Error('Legacy profile fixture is missing Language.');
+  language.configVersion = 1;
+  language.config = { preferredLanguages: ['fr', 'en'], fallback: 'original' };
+  return rules;
+}
+
+function insertLegacyProfile(context: TestContext): number {
+  const now = new Date('2026-01-02T03:04:05.000Z');
+  const profileResult = context.database.db
+    .insert(profiles)
+    .values({
+      name: 'Legacy language profile',
+      description: null,
+      schemaVersion: 1,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+  const profileId = Number(profileResult.lastInsertRowid);
+  context.database.db
+    .insert(profileRules)
+    .values(
+      legacyLanguageRules().map((rule) => {
+        const { type, position, configVersion, config } = rule;
+        if (
+          !isProfileRuleType(type) ||
+          typeof position !== 'number' ||
+          typeof configVersion !== 'number' ||
+          config === null ||
+          typeof config !== 'object' ||
+          Array.isArray(config)
+        ) {
+          throw new Error('Legacy rule fixture is invalid.');
+        }
+        return {
+          profileId,
+          type,
+          position,
+          configVersion,
+          configJson: JSON.stringify(config),
+          createdAt: now,
+          updatedAt: now,
+        };
+      }),
+    )
+    .run();
+  return profileId;
+}
+
+function legacyStorageSnapshot(context: TestContext, profileId: number): unknown {
+  const profile = context.database.db
+    .select({
+      name: profiles.name,
+      description: profiles.description,
+      schemaVersion: profiles.schemaVersion,
+      revision: profiles.revision,
+      createdAt: profiles.createdAt,
+      updatedAt: profiles.updatedAt,
+    })
+    .from(profiles)
+    .where(eq(profiles.id, profileId))
+    .get();
+  const rules = context.database.db
+    .select({
+      type: profileRules.type,
+      position: profileRules.position,
+      configVersion: profileRules.configVersion,
+      configJson: profileRules.configJson,
+      createdAt: profileRules.createdAt,
+      updatedAt: profileRules.updatedAt,
+    })
+    .from(profileRules)
+    .where(eq(profileRules.profileId, profileId))
+    .all();
+  if (!profile || rules.length !== 8) throw new Error('Legacy storage fixture is missing data.');
+  return { profile, rules };
+}
+
 describe('Profiles API', () => {
   let context: TestContext | undefined;
   afterEach(async () => context?.cleanup());
@@ -149,7 +236,10 @@ describe('Profiles API', () => {
         'custom_formats',
         'indexer',
       ]);
-      expect(created.rules[0]?.config).toMatchObject({ preferredLanguages: ['fr', 'en'] });
+      expect(created.rules[0]).toMatchObject({
+        configVersion: 2,
+        config: { importance: 'high', preferredLanguages: ['fr', 'en'] },
+      });
       const fetched = await context.app.inject({
         method: 'GET',
         url: `/api/profiles/${String(created.id)}`,
@@ -162,6 +252,120 @@ describe('Profiles API', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  it('reads a persisted Language V1 profile without modifying legacy data', async () => {
+    context = createTestContext();
+    const profileId = insertLegacyProfile(context);
+    const before = structuredClone(legacyStorageSnapshot(context, profileId));
+
+    const fetched = await context.app.inject({
+      method: 'GET',
+      url: `/api/profiles/${String(profileId)}`,
+    });
+    expect(fetched.statusCode).toBe(200);
+    const legacyProfile = fetched.json<ProfileResponse>();
+    expect(legacyProfile).toMatchObject({
+      id: profileId,
+      schemaVersion: 1,
+      revision: 1,
+    });
+    expect(legacyProfile.rules[0]).toMatchObject({
+      type: 'language',
+      configVersion: 1,
+      config: { preferredLanguages: ['fr', 'en'], fallback: 'original' },
+    });
+    const listed = await context.app.inject({ method: 'GET', url: '/api/profiles' });
+    expect(listed.json<{ profiles: ProfileResponse[] }>().profiles).toHaveLength(1);
+    expect(legacyStorageSnapshot(context, profileId)).toEqual(before);
+  });
+
+  it('updates legacy profile metadata without upgrading or rewriting its Language V1 rules', async () => {
+    context = createTestContext();
+    const profileId = insertLegacyProfile(context);
+    const before = legacyStorageSnapshot(context, profileId) as { rules: unknown };
+
+    const response = await context.app.inject({
+      method: 'PATCH',
+      url: `/api/profiles/${String(profileId)}`,
+      payload: { name: 'Legacy renamed', description: 'Metadata only' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const updated = response.json<ProfileResponse>();
+    expect(updated).toMatchObject({
+      id: profileId,
+      name: 'Legacy renamed',
+      description: 'Metadata only',
+      schemaVersion: 1,
+      revision: 2,
+    });
+    expect(updated.rules[0]).toMatchObject({
+      type: 'language',
+      configVersion: 1,
+      config: { preferredLanguages: ['fr', 'en'], fallback: 'original' },
+    });
+    const after = legacyStorageSnapshot(context, profileId) as { rules: unknown };
+    expect(after.rules).toEqual(before.rules);
+  });
+
+  it('rejects Language V1 on new profile creation and full rule replacement', async () => {
+    context = createTestContext();
+    const legacyCreate = await context.app.inject({
+      method: 'POST',
+      url: '/api/profiles',
+      payload: { ...profilePayload(), rules: legacyLanguageRules() },
+    });
+    expect(legacyCreate.statusCode).toBe(400);
+    expect(context.database.db.select().from(profiles).all()).toEqual([]);
+
+    const created = await createProfile(context);
+    const legacyReplace = await context.app.inject({
+      method: 'PUT',
+      url: `/api/profiles/${String(created.id)}/rules`,
+      payload: { rules: legacyLanguageRules() },
+    });
+    expect(legacyReplace.statusCode).toBe(400);
+    const unchanged = await context.app.inject({
+      method: 'GET',
+      url: `/api/profiles/${String(created.id)}`,
+    });
+    expect(unchanged.json<ProfileResponse>()).toEqual(created);
+  });
+
+  it('accepts an explicit Language V1 to V2 upgrade and retains V1 for the seven other rules', async () => {
+    context = createTestContext();
+    const profileId = insertLegacyProfile(context);
+
+    const response = await context.app.inject({
+      method: 'PUT',
+      url: `/api/profiles/${String(profileId)}/rules`,
+      payload: { rules: rulesFrom(profilePayload()) },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const upgraded = response.json<ProfileResponse>();
+    expect(upgraded).toMatchObject({
+      id: profileId,
+      schemaVersion: 1,
+      revision: 2,
+    });
+    expect(upgraded.rules[0]).toMatchObject({
+      type: 'language',
+      configVersion: 2,
+      config: { importance: 'high', preferredLanguages: ['fr', 'en'] },
+    });
+    const storedVersions = context.database.db
+      .select({ type: profileRules.type, configVersion: profileRules.configVersion })
+      .from(profileRules)
+      .where(eq(profileRules.profileId, profileId))
+      .all();
+    expect(storedVersions).toContainEqual({ type: 'language', configVersion: 2 });
+    expect(
+      storedVersions
+        .filter((rule) => rule.type !== 'language')
+        .every((rule) => rule.configVersion === 1),
+    ).toBe(true);
   });
 
   it('increments revision when profile metadata is persisted', async () => {

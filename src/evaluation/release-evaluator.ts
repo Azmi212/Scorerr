@@ -1,4 +1,4 @@
-import type { ProfileRuleInput, ProfileRuleType } from '../services/profile-service.js';
+import type { ProfileRuleType, StoredProfileRuleInput } from '../services/profile-service.js';
 import type { NormalizedRelease, ReleaseProtocol } from '../services/release-normalizer.js';
 
 export type EvaluationState =
@@ -53,7 +53,7 @@ export interface EvaluationProfile {
   id: number;
   schemaVersion: number;
   revision: number;
-  rules: readonly ProfileRuleInput[];
+  rules: readonly StoredProfileRuleInput[];
 }
 
 export interface MovieEvaluationContext {
@@ -118,11 +118,12 @@ function warning(
   return details === undefined ? { rule, code } : { rule, code, details };
 }
 
-function importanceFor(rule: ProfileRuleInput): RuleImportance | null {
-  return rule.type === 'language' ? null : rule.config.importance;
+function importanceFor(rule: StoredProfileRuleInput): RuleImportance | null {
+  if (rule.type !== 'language') return rule.config.importance;
+  return 'importance' in rule.config ? rule.config.importance : null;
 }
 
-function result(rule: ProfileRuleInput, input: EvaluationResultInput): RuleEvaluation {
+function result(rule: StoredProfileRuleInput, input: EvaluationResultInput): RuleEvaluation {
   return {
     rule: rule.type,
     configVersion: rule.configVersion,
@@ -137,7 +138,7 @@ function result(rule: ProfileRuleInput, input: EvaluationResultInput): RuleEvalu
   };
 }
 
-function assertCompleteRuleSet(rules: readonly ProfileRuleInput[]): void {
+function assertCompleteRuleSet(rules: readonly StoredProfileRuleInput[]): void {
   const ruleTypes = new Set(rules.map((rule) => rule.type));
   if (
     rules.length !== evaluationRuleTypes.length ||
@@ -163,7 +164,10 @@ function missingRule(type: ProfileRuleType): RuleEvaluation {
   };
 }
 
-function gatedByRadarr(rule: ProfileRuleInput | undefined, type: ProfileRuleType): RuleEvaluation {
+function gatedByRadarr(
+  rule: StoredProfileRuleInput | undefined,
+  type: ProfileRuleType,
+): RuleEvaluation {
   if (!rule) return missingRule(type);
   return result(rule, {
     applicable: false,
@@ -174,11 +178,11 @@ function gatedByRadarr(rule: ProfileRuleInput | undefined, type: ProfileRuleType
 }
 
 function ruleFor<T extends ProfileRuleType>(
-  rules: readonly ProfileRuleInput[],
+  rules: readonly StoredProfileRuleInput[],
   type: T,
-): Extract<ProfileRuleInput, { type: T }> | undefined {
+): Extract<StoredProfileRuleInput, { type: T }> | undefined {
   return rules.find((rule) => rule.type === type) as
-    Extract<ProfileRuleInput, { type: T }> | undefined;
+    Extract<StoredProfileRuleInput, { type: T }> | undefined;
 }
 
 function canonicalLanguageCode(value: unknown): string | null {
@@ -215,7 +219,7 @@ function normalizeValue(value: string): string {
 }
 
 function evaluateLanguage(
-  rule: Extract<ProfileRuleInput, { type: 'language' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'language' }> | undefined,
   release: NormalizedRelease,
   movieContext: MovieEvaluationContext | undefined,
 ): RuleEvaluation {
@@ -271,7 +275,7 @@ function evaluateLanguage(
 }
 
 function evaluateSeeders(
-  rule: Extract<ProfileRuleInput, { type: 'seeders' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'seeders' }> | undefined,
   release: NormalizedRelease,
 ): RuleEvaluation {
   if (!rule) return missingRule('seeders');
@@ -317,7 +321,7 @@ function evaluateSeeders(
 }
 
 function evaluateResolution(
-  rule: Extract<ProfileRuleInput, { type: 'resolution' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'resolution' }> | undefined,
   release: NormalizedRelease,
 ): RuleEvaluation {
   if (!rule) return missingRule('resolution');
@@ -362,7 +366,7 @@ function evaluateResolution(
 }
 
 function evaluateSource(
-  rule: Extract<ProfileRuleInput, { type: 'source' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'source' }> | undefined,
   release: NormalizedRelease,
 ): RuleEvaluation {
   if (!rule) return missingRule('source');
@@ -410,7 +414,7 @@ function evaluateSource(
 }
 
 function evaluateSize(
-  rule: Extract<ProfileRuleInput, { type: 'size' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'size' }> | undefined,
   release: NormalizedRelease,
 ): RuleEvaluation {
   if (!rule) return missingRule('size');
@@ -445,7 +449,7 @@ function evaluateSize(
 }
 
 function evaluateCodec(
-  rule: Extract<ProfileRuleInput, { type: 'codec' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'codec' }> | undefined,
 ): RuleEvaluation {
   if (!rule) return missingRule('codec');
   return result(rule, {
@@ -458,7 +462,7 @@ function evaluateCodec(
 }
 
 function evaluateCustomFormats(
-  rule: Extract<ProfileRuleInput, { type: 'custom_formats' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'custom_formats' }> | undefined,
   release: NormalizedRelease,
 ): RuleEvaluation {
   if (!rule) return missingRule('custom_formats');
@@ -492,7 +496,7 @@ function evaluateCustomFormats(
 }
 
 function evaluateIndexer(
-  rule: Extract<ProfileRuleInput, { type: 'indexer' }> | undefined,
+  rule: Extract<StoredProfileRuleInput, { type: 'indexer' }> | undefined,
   release: NormalizedRelease,
   radarrConnectionId: number,
   knownRadarrConnectionIds: readonly number[] | undefined,

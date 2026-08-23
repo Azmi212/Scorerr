@@ -9,7 +9,7 @@ import {
   type ReleaseEvaluationInput,
 } from '../src/evaluation/release-evaluator.js';
 import { normalizeRelease, type NormalizedRelease } from '../src/services/release-normalizer.js';
-import type { ProfileRuleInput, ProfileRuleType } from '../src/services/profile-service.js';
+import type { ProfileRuleType, StoredProfileRuleInput } from '../src/services/profile-service.js';
 
 const gibibyte = 1024 * 1024 * 1024;
 
@@ -26,12 +26,12 @@ interface EvaluationOptions {
 }
 
 function baseProfile(): EvaluationProfile {
-  const rules: ProfileRuleInput[] = [
+  const rules: StoredProfileRuleInput[] = [
     {
       type: 'language',
       position: 0,
-      configVersion: 1,
-      config: { preferredLanguages: ['fr', 'en'], fallback: 'original' },
+      configVersion: 2,
+      config: { importance: 'high', preferredLanguages: ['fr', 'en'], fallback: 'original' },
     },
     {
       type: 'seeders',
@@ -92,13 +92,33 @@ function baseProfile(): EvaluationProfile {
   return { id: 42, schemaVersion: 1, revision: 7, rules };
 }
 
+function legacyLanguageProfile(): EvaluationProfile {
+  const profile = baseProfile();
+  return {
+    ...profile,
+    rules: profile.rules.map((rule) =>
+      rule.type === 'language'
+        ? {
+            type: 'language',
+            position: rule.position,
+            configVersion: 1,
+            config: {
+              preferredLanguages: [...rule.config.preferredLanguages],
+              fallback: rule.config.fallback,
+            },
+          }
+        : rule,
+    ),
+  };
+}
+
 function ruleOf<T extends ProfileRuleType>(
   profile: EvaluationProfile,
   type: T,
-): Extract<ProfileRuleInput, { type: T }> {
+): Extract<StoredProfileRuleInput, { type: T }> {
   const rule = profile.rules.find((candidate) => candidate.type === type);
   if (!rule) throw new Error(`Test profile is missing ${type}.`);
-  return rule as Extract<ProfileRuleInput, { type: T }>;
+  return rule as Extract<StoredProfileRuleInput, { type: T }>;
 }
 
 function releaseFromFixture(releaseGroup: string): NormalizedRelease {
@@ -187,7 +207,11 @@ describe('Pure Phase 3 release evaluation', () => {
       profileEligible: true,
       eligible: true,
     });
-    expect(result.rules.language).toMatchObject({ state: 'preferred', configVersion: 1 });
+    expect(result.rules.language).toMatchObject({
+      state: 'preferred',
+      configVersion: 2,
+      importance: 'high',
+    });
     expect(result.rules.seeders).toMatchObject({ state: 'preferred', importance: 'high' });
     expect(result.rules.resolution).toMatchObject({ state: 'preferred', importance: 'medium' });
     expect(result.rules.source).toMatchObject({ state: 'preferred', importance: 'priority' });
@@ -207,6 +231,20 @@ describe('Pure Phase 3 release evaluation', () => {
       rule: 'codec',
       code: 'structured_codec_unavailable',
     });
+  });
+
+  it('keeps a legacy Language V1 rule readable without inventing an importance', () => {
+    const profile = legacyLanguageProfile();
+    const before = structuredClone(profile);
+
+    const result = evaluate(syntheticRelease(), profile);
+
+    expect(result.rules.language).toMatchObject({
+      configVersion: 1,
+      importance: null,
+      state: 'preferred',
+    });
+    expect(profile).toEqual(before);
   });
 
   it('treats the Radarr barrier as final, including an explicitly rejected release', () => {

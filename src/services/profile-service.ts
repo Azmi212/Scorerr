@@ -18,13 +18,24 @@ export const profileRuleTypes = [
 export type ProfileRuleType = (typeof profileRuleTypes)[number];
 
 export const profileSchemaVersion = 1;
+/** Version shared by the seven non-language rule configurations. */
 export const profileRuleConfigVersion = 1;
+export const legacyLanguageRuleConfigVersion = 1;
+export const languageRuleConfigVersion = 2;
 
 const importanceSchema = z.enum(['low', 'medium', 'high', 'priority']);
 const languageCodeSchema = z.string().regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/);
 
+const legacyLanguageConfigSchema = z
+  .object({
+    preferredLanguages: z.array(languageCodeSchema),
+    fallback: z.literal('original'),
+  })
+  .strict();
+
 const languageConfigSchema = z
   .object({
+    importance: importanceSchema,
     preferredLanguages: z.array(languageCodeSchema),
     fallback: z.literal('original'),
   })
@@ -91,35 +102,91 @@ const indexerConfigSchema = z
   })
   .strict();
 
-const ruleInputBase = {
-  position: z.number().int().nonnegative(),
+const rulePositionSchema = z.number().int().nonnegative();
+
+const nonLanguageRuleInputBase = {
+  position: rulePositionSchema,
   configVersion: z.literal(profileRuleConfigVersion),
 };
 
+const legacyLanguageRuleInputSchema = z
+  .object({
+    type: z.literal('language'),
+    position: rulePositionSchema,
+    configVersion: z.literal(legacyLanguageRuleConfigVersion),
+    config: legacyLanguageConfigSchema,
+  })
+  .strict();
+
+const languageRuleInputSchema = z
+  .object({
+    type: z.literal('language'),
+    position: rulePositionSchema,
+    configVersion: z.literal(languageRuleConfigVersion),
+    config: languageConfigSchema,
+  })
+  .strict();
+
 export const profileRuleInputSchema = z.discriminatedUnion('type', [
+  languageRuleInputSchema,
   z
-    .object({ type: z.literal('language'), ...ruleInputBase, config: languageConfigSchema })
+    .object({
+      type: z.literal('seeders'),
+      ...nonLanguageRuleInputBase,
+      config: seedersConfigSchema,
+    })
     .strict(),
-  z.object({ type: z.literal('seeders'), ...ruleInputBase, config: seedersConfigSchema }).strict(),
   z
-    .object({ type: z.literal('resolution'), ...ruleInputBase, config: resolutionConfigSchema })
+    .object({
+      type: z.literal('resolution'),
+      ...nonLanguageRuleInputBase,
+      config: resolutionConfigSchema,
+    })
     .strict(),
-  z.object({ type: z.literal('source'), ...ruleInputBase, config: sourceConfigSchema }).strict(),
-  z.object({ type: z.literal('size'), ...ruleInputBase, config: sizeConfigSchema }).strict(),
-  z.object({ type: z.literal('codec'), ...ruleInputBase, config: codecConfigSchema }).strict(),
+  z
+    .object({ type: z.literal('source'), ...nonLanguageRuleInputBase, config: sourceConfigSchema })
+    .strict(),
+  z
+    .object({ type: z.literal('size'), ...nonLanguageRuleInputBase, config: sizeConfigSchema })
+    .strict(),
+  z
+    .object({ type: z.literal('codec'), ...nonLanguageRuleInputBase, config: codecConfigSchema })
+    .strict(),
   z
     .object({
       type: z.literal('custom_formats'),
-      ...ruleInputBase,
+      ...nonLanguageRuleInputBase,
       config: customFormatsConfigSchema,
     })
     .strict(),
-  z.object({ type: z.literal('indexer'), ...ruleInputBase, config: indexerConfigSchema }).strict(),
+  z
+    .object({
+      type: z.literal('indexer'),
+      ...nonLanguageRuleInputBase,
+      config: indexerConfigSchema,
+    })
+    .strict(),
+]);
+
+/**
+ * Stored profiles may still contain the legacy Language V1 configuration.
+ * It is accepted only while reading persisted data; all write schemas use
+ * profileRuleInputSchema and therefore require Language V2.
+ */
+export const storedProfileRuleInputSchema = z.union([
+  legacyLanguageRuleInputSchema,
+  ...profileRuleInputSchema.options,
 ]);
 
 export type ProfileRuleInput = z.infer<typeof profileRuleInputSchema>;
+export type StoredProfileRuleInput = z.infer<typeof storedProfileRuleInputSchema>;
 
-function exactRuleSet(rules: ProfileRuleInput[], context: z.RefinementCtx): void {
+interface RuleIdentity {
+  type: ProfileRuleType;
+  position: number;
+}
+
+function exactRuleSet(rules: readonly RuleIdentity[], context: z.RefinementCtx): void {
   const seenTypes = new Set<ProfileRuleType>();
   const seenPositions = new Set<number>();
   for (const [index, rule] of rules.entries()) {
@@ -191,7 +258,7 @@ export interface ProfileView {
   revision: number;
   createdAt: string;
   updatedAt: string;
-  rules: ProfileRuleInput[];
+  rules: StoredProfileRuleInput[];
 }
 
 export class ProfileServiceError extends Error {
@@ -302,7 +369,7 @@ export class ProfileService {
       .orderBy(asc(profileRules.position), asc(profileRules.id))
       .all()
       .map((rule) => {
-        const parsed = profileRuleInputSchema.safeParse({
+        const parsed = storedProfileRuleInputSchema.safeParse({
           type: rule.type,
           position: rule.position,
           configVersion: rule.configVersion,
