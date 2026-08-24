@@ -9,7 +9,7 @@ services:
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
-      PORT: ${SCORERR_PORT:-3000}
+      PORT: ${SCORERR_PORT:-2120}
       DATABASE_PATH: /data/scorerr.db
       LOG_LEVEL: ${LOG_LEVEL:-info}
       BODY_LIMIT_BYTES: ${BODY_LIMIT_BYTES:-1048576}
@@ -24,7 +24,7 @@ services:
       HTTP_TIMEOUT_MS: ${HTTP_TIMEOUT_MS:-5000}
       HTTP_MAX_RESPONSE_BYTES: ${HTTP_MAX_RESPONSE_BYTES:-2097152}
     ports:
-      - '${SCORERR_PORT:-3000}:${SCORERR_PORT:-3000}'
+      - '${SCORERR_PORT:-2120}:${SCORERR_PORT:-2120}'
     volumes:
       - scorerr-data:/data
     networks:
@@ -35,7 +35,7 @@ services:
           'CMD',
           'node',
           '-e',
-          "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:'+(process.env.PORT||2120)+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 30s
       timeout: 5s

@@ -15,7 +15,7 @@ export interface TestContext {
   cleanup: () => Promise<void>;
 }
 
-export function createTestContext(): TestContext {
+export function createTestContext(frontendRoot?: string | false): TestContext {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'scorerr-test-'));
   const database = createDatabase(path.join(directory, 'test.db'));
   applyMigrations(database);
@@ -41,7 +41,11 @@ export function createTestContext(): TestContext {
     WORKER_LOCK_TIMEOUT_MS: 300_000,
     WORKER_MAX_ATTEMPTS: 3,
   };
-  const app = buildApp({ config, database });
+  const app = buildApp({
+    config,
+    database,
+    ...(frontendRoot === undefined ? {} : { frontendRoot }),
+  });
 
   return {
     app,

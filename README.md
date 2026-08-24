@@ -39,7 +39,7 @@ Ouvrez `http://ADRESSE_SCORERR:PORT/setup` depuis le réseau local. Cette interf
 4. Vérifiez l'URL de callback affichée et les changements annoncés.
 5. Après le futur probe et l'activation explicite des écritures, le bouton crée le snapshot puis applique les changements.
 
-`SCORERR_PUBLIC_URL` est l'adresse que **Radarr** doit pouvoir joindre, pas nécessairement l'adresse utilisée dans le navigateur. Le callback final est `${SCORERR_PUBLIC_URL}/api/webhooks/radarr`. `http://scorerr:3000` fonctionne uniquement si Radarr partage un réseau Docker où ce nom est résolvable ; une IP LAN peut être nécessaire dans Portainer.
+`SCORERR_PUBLIC_URL` est l'adresse que **Radarr** doit pouvoir joindre, pas nécessairement l'adresse utilisée dans le navigateur. Le callback final est `${SCORERR_PUBLIC_URL}/api/webhooks/radarr`. `http://scorerr:2120` fonctionne uniquement si Radarr partage un réseau Docker où ce nom est résolvable ; une IP LAN peut être nécessaire dans Portainer.
 
 ### Changements automatiques et rollback
 
@@ -102,7 +102,13 @@ npm install
 npm run dev
 ```
 
-L'API applique seule les migrations et écoute par défaut sur `http://127.0.0.1:3000`. La base locale est créée dans `./data/scorerr.db`.
+En développement, lancez Vite dans un second terminal :
+
+```powershell
+npm run dev:web
+```
+
+Vite sert l'interface sur `http://127.0.0.1:5173` et relaie les routes backend vers `http://127.0.0.1:2120`. Après `npm run build`, Fastify sert directement les assets compilés : l'API et l'interface web partagent alors le même processus et le même port `2120`. L'API applique seule les migrations. La base locale est créée dans `./data/scorerr.db`.
 
 Dans un second terminal :
 
@@ -116,14 +122,14 @@ Le worker n'applique jamais les migrations. Il attend que l'API ait créé le sc
 
 ```powershell
 $body = '{"eventType":"Test","movie":{"id":42,"title":"Demo"}}'
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:3000/api/webhooks/radarr -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:2120/api/webhooks/radarr -ContentType 'application/json' -Body $body
 ```
 
 Le premier appel renvoie `accepted: true`, `duplicate: false`, un `eventId` et un `taskId`. Relancer la commande renvoie `duplicate: true` sans créer de nouvelle tâche.
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:3000/api/events
-Invoke-RestMethod http://127.0.0.1:3000/health
+Invoke-RestMethod http://127.0.0.1:2120/api/events
+Invoke-RestMethod http://127.0.0.1:2120/health
 ```
 
 ## Variables du worker
@@ -276,10 +282,10 @@ Remplacez les placeholders par vos valeurs :
 
 ```dotenv
 SCORERR_IMAGE=ghcr.io/PROPRIETAIRE_GITHUB/scorerr:latest
-PORT_SCORERR=3000
+PORT_SCORERR=2120
 DOCKER_NETWORK_NAME=scorerr-network
 SCORERR_VOLUME_NAME=scorerr-data
-SCORERR_PUBLIC_URL=http://ADRESSE_JOIGNABLE_DEPUIS_RADARR:3000
+SCORERR_PUBLIC_URL=http://ADRESSE_JOIGNABLE_DEPUIS_RADARR:2120
 SETUP_WRITES_ENABLED=false
 WORKER_LOCK_TIMEOUT_MS=300000
 WORKER_MAX_ATTEMPTS=3

@@ -14,6 +14,7 @@ import { InstallationService } from '../services/installation-service.js';
 import { ProfileService } from '../services/profile-service.js';
 import { ReleaseProbeService } from '../services/release-probe-service.js';
 import { SimulationService } from '../services/simulation-service.js';
+import { registerFrontend } from './frontend.js';
 
 export interface AppDependencies {
   config: AppConfig;
@@ -22,6 +23,7 @@ export interface AppDependencies {
   profileService?: ProfileService;
   releaseProbeService?: ReleaseProbeService;
   simulationService?: SimulationService;
+  frontendRoot?: string | false;
 }
 
 export function buildApp({
@@ -31,6 +33,7 @@ export function buildApp({
   profileService,
   releaseProbeService,
   simulationService,
+  frontendRoot,
 }: AppDependencies): FastifyInstance {
   const app = Fastify({
     logger:
@@ -81,5 +84,6 @@ export function buildApp({
     app,
     simulationService ?? new SimulationService(database, config, secretStore),
   );
+  registerFrontend(app, frontendRoot === undefined ? {} : { root: frontendRoot });
   return app;
 }

@@ -1,8 +1,13 @@
+.git
+.github
+.agents
+.codex
 node_modules
+web/node_modules
 dist
+web/dist
+web/*.tsbuildinfo
 coverage
 data
-.env
-.git
-.tools
 *.log
+.env*
