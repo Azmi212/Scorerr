@@ -70,6 +70,7 @@ export const serviceConnections = sqliteTable(
     baseUrl: text('base_url').notNull(),
     secretRef: text('secret_ref').notNull(),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(false),
+    isDefault: integer('is_default', { mode: 'boolean' }).notNull().default(false),
     connectionStatus: text('connection_status').notNull().default('untested'),
     version: text('version'),
     instanceName: text('instance_name'),
@@ -81,6 +82,9 @@ export const serviceConnections = sqliteTable(
   (table) => [
     uniqueIndex('service_connections_service_url_unique').on(table.service, table.baseUrl),
     index('service_connections_active_index').on(table.service, table.isActive),
+    uniqueIndex('service_connections_one_default_per_service_unique')
+      .on(table.service)
+      .where(sql`${table.isDefault} = 1`),
   ],
 );
 
@@ -224,15 +228,94 @@ export const releaseProbeItems = sqliteTable(
   ],
 );
 
-export const profiles = sqliteTable('profiles', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  name: text('name').notNull(),
-  description: text('description'),
-  schemaVersion: integer('schema_version').notNull(),
-  revision: integer('revision').notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
-});
+export const profiles = sqliteTable(
+  'profiles',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    description: text('description'),
+    schemaVersion: integer('schema_version').notNull(),
+    revision: integer('revision').notNull(),
+    isDefault: integer('is_default', { mode: 'boolean' }).notNull().default(false),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('profiles_one_default_unique')
+      .on(table.isDefault)
+      .where(sql`${table.isDefault} = 1`),
+  ],
+);
+
+export const simulations = sqliteTable(
+  'simulations',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    status: text('status', {
+      enum: ['queued', 'running', 'completed', 'failed'],
+    }).notNull(),
+    outcome: text('outcome', { enum: ['selected', 'no_suitable_release', 'equivalent'] }),
+    movieId: integer('movie_id').notNull(),
+    movieJson: text('movie_json'),
+    radarrConnectionId: integer('radarr_connection_id').notNull(),
+    radarrSnapshotJson: text('radarr_snapshot_json').notNull(),
+    profileId: integer('profile_id').notNull(),
+    profileRevision: integer('profile_revision').notNull(),
+    profileSchemaVersion: integer('profile_schema_version').notNull(),
+    profileSnapshotJson: text('profile_snapshot_json').notNull(),
+    progressJson: text('progress_json').notNull(),
+    summaryJson: text('summary_json'),
+    selectionJson: text('selection_json'),
+    resultJson: text('result_json'),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    attempts: integer('attempts').notNull().default(0),
+    availableAt: integer('available_at', { mode: 'timestamp_ms' }).notNull(),
+    lockedAt: integer('locked_at', { mode: 'timestamp_ms' }),
+    lockedBy: text('locked_by'),
+    lastError: text('last_error'),
+    startedAt: integer('started_at', { mode: 'timestamp_ms' }).notNull(),
+    completedAt: integer('completed_at', { mode: 'timestamp_ms' }),
+  },
+  (table) => [
+    index('simulations_started_index').on(table.startedAt, table.id),
+    index('simulations_profile_revision_index').on(table.profileId, table.profileRevision),
+    index('simulations_radarr_movie_index').on(table.radarrConnectionId, table.movieId),
+    index('simulations_claim_index').on(table.status, table.availableAt, table.id),
+  ],
+);
+
+export const simulationReleases = sqliteTable(
+  'simulation_releases',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    simulationId: integer('simulation_id')
+      .notNull()
+      .references(() => simulations.id, { onDelete: 'cascade' }),
+    ordinal: integer('ordinal').notNull(),
+    presentationOrdinal: integer('presentation_ordinal').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    category: text('category', {
+      enum: ['radarr_rejected', 'scorerr_refused', 'selection_eliminated', 'finalist', 'selected'],
+    }).notNull(),
+    eliminatedAtStep: integer('eliminated_at_step'),
+    observedJson: text('observed_json').notNull(),
+    normalizedJson: text('normalized_json').notNull(),
+    evaluationJson: text('evaluation_json').notNull(),
+    reasonsJson: text('reasons_json').notNull(),
+  },
+  (table) => [
+    uniqueIndex('simulation_releases_simulation_ordinal_unique').on(
+      table.simulationId,
+      table.ordinal,
+    ),
+    index('simulation_releases_presentation_index').on(
+      table.simulationId,
+      table.presentationOrdinal,
+    ),
+    index('simulation_releases_category_index').on(table.simulationId, table.category),
+  ],
+);
 
 export const profileRules = sqliteTable(
   'profile_rules',

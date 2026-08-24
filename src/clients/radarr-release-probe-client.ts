@@ -1,6 +1,6 @@
 import { SafeHttpClient, type HttpClientOptions } from './http-client.js';
 
-/** GET-only Radarr client for Phase 3. It intentionally exposes no mutation or grab method. */
+/** GET-only Radarr client for diagnostics and simulation. It exposes no mutation or grab method. */
 export class RadarrReleaseProbeClient {
   private readonly http: SafeHttpClient;
 
@@ -10,6 +10,10 @@ export class RadarrReleaseProbeClient {
 
   movie(movieId: number): Promise<unknown> {
     return this.http.request('GET', `/api/v3/movie/${String(movieId)}`);
+  }
+
+  movies(): Promise<unknown> {
+    return this.http.request('GET', '/api/v3/movie');
   }
 
   releases(movieId: number): Promise<unknown> {

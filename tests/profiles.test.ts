@@ -11,6 +11,7 @@ interface ProfileResponse {
   description: string | null;
   schemaVersion: number;
   revision: number;
+  isDefault: boolean;
   createdAt: string;
   updatedAt: string;
   rules: {
@@ -379,6 +380,44 @@ describe('Profiles API', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json<ProfileResponse>()).toMatchObject({
       name: 'Cinéma révisé',
+      revision: 2,
+    });
+  });
+
+  it('assigns the explicit default profile atomically without inventing a default', async () => {
+    context = createTestContext();
+    const firstResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/profiles',
+      payload: { ...profilePayload(), name: 'First profile' },
+    });
+    const secondResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/profiles',
+      payload: { ...profilePayload(), name: 'Second profile', isDefault: true },
+    });
+    const first = firstResponse.json<ProfileResponse>();
+    const second = secondResponse.json<ProfileResponse>();
+
+    expect(first.isDefault).toBe(false);
+    expect(second.isDefault).toBe(true);
+
+    const switched = await context.app.inject({
+      method: 'PATCH',
+      url: `/api/profiles/${String(first.id)}`,
+      payload: { isDefault: true },
+    });
+    expect(switched.json<ProfileResponse>()).toMatchObject({
+      id: first.id,
+      isDefault: true,
+      revision: 2,
+    });
+    const previousDefault = await context.app.inject({
+      url: `/api/profiles/${String(second.id)}`,
+    });
+    expect(previousDefault.json<ProfileResponse>()).toMatchObject({
+      id: second.id,
+      isDefault: false,
       revision: 2,
     });
   });

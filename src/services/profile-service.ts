@@ -228,6 +228,7 @@ export const createProfileRequestSchema = z
   .object({
     name: profileNameSchema,
     description: z.string().nullable().optional(),
+    isDefault: z.boolean().optional(),
     rules: exactProfileRulesSchema,
   })
   .strict();
@@ -236,11 +237,16 @@ export const patchProfileRequestSchema = z
   .object({
     name: profileNameSchema.optional(),
     description: z.string().nullable().optional(),
+    isDefault: z.boolean().optional(),
   })
   .strict()
-  .refine((input) => input.name !== undefined || input.description !== undefined, {
-    message: 'At least one profile field must be provided',
-  });
+  .refine(
+    (input) =>
+      input.name !== undefined || input.description !== undefined || input.isDefault !== undefined,
+    {
+      message: 'At least one profile field must be provided',
+    },
+  );
 
 export const replaceProfileRulesRequestSchema = z
   .object({ rules: exactProfileRulesSchema })
@@ -256,6 +262,7 @@ export interface ProfileView {
   description: string | null;
   schemaVersion: number;
   revision: number;
+  isDefault: boolean;
   createdAt: string;
   updatedAt: string;
   rules: StoredProfileRuleInput[];
@@ -263,7 +270,8 @@ export interface ProfileView {
 
 export class ProfileServiceError extends Error {
   constructor(
-    public readonly code: 'profile_not_found' | 'invalid_indexer_connection',
+    public readonly code:
+      'profile_not_found' | 'default_profile_not_configured' | 'invalid_indexer_connection',
     public readonly statusCode: 404 | 422,
     message: string,
   ) {
@@ -288,11 +296,27 @@ export class ProfileService {
     return this.serializeProfile(this.requireProfile(profileId));
   }
 
+  getDefault(): ProfileView {
+    const profile = this.database.db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.isDefault, true))
+      .get();
+    if (!profile)
+      throw new ProfileServiceError(
+        'default_profile_not_configured',
+        404,
+        'A default profile is required',
+      );
+    return this.serializeProfile(profile);
+  }
+
   create(input: CreateProfileInput): ProfileView {
     let profileId: number | undefined;
     this.database.sqlite.transaction(() => {
       this.assertIndexerConnections(input.rules);
       const now = new Date();
+      if (input.isDefault === true) this.clearDefault(now);
       const inserted = this.database.db
         .insert(profiles)
         .values({
@@ -300,6 +324,7 @@ export class ProfileService {
           description: input.description ?? null,
           schemaVersion: profileSchemaVersion,
           revision: 1,
+          isDefault: input.isDefault ?? false,
           createdAt: now,
           updatedAt: now,
         })
@@ -315,11 +340,13 @@ export class ProfileService {
     this.database.sqlite.transaction(() => {
       const profile = this.requireProfile(profileId);
       const now = new Date();
+      if (input.isDefault === true) this.clearDefault(now, profileId);
       this.database.db
         .update(profiles)
         .set({
           name: input.name ?? profile.name,
           description: input.description === undefined ? profile.description : input.description,
+          isDefault: input.isDefault ?? profile.isDefault,
           revision: profile.revision + 1,
           updatedAt: now,
         })
@@ -384,6 +411,7 @@ export class ProfileService {
       description: profile.description,
       schemaVersion: profile.schemaVersion,
       revision: profile.revision,
+      isDefault: profile.isDefault,
       createdAt: profile.createdAt.toISOString(),
       updatedAt: profile.updatedAt.toISOString(),
       rules,
@@ -404,6 +432,20 @@ export class ProfileService {
           updatedAt: now,
         })),
       )
+      .run();
+  }
+
+  private clearDefault(now: Date, exceptProfileId?: number): void {
+    const existing = this.database.db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.isDefault, true))
+      .get();
+    if (!existing || existing.id === exceptProfileId) return;
+    this.database.db
+      .update(profiles)
+      .set({ isDefault: false, revision: existing.revision + 1, updatedAt: now })
+      .where(eq(profiles.id, existing.id))
       .run();
   }
 
