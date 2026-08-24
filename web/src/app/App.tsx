@@ -2,10 +2,10 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { AppShell } from './AppShell';
 import { DesignSystemPage } from '../pages/DesignSystemPage';
+import { DashboardPage } from '../pages/DashboardPage';
 import { NotFoundPage, PlaceholderPage } from '../pages/PlaceholderPage';
 
 const pages = [
-  { path: '/', title: 'Dashboard', description: 'Vue d’ensemble de scorerr.' },
   { path: '/profiles', title: 'Vos profils', description: 'Gérez vos stratégies de sélection.' },
   {
     path: '/profiles/:id',
@@ -38,6 +38,7 @@ export function App() {
   return (
     <Routes>
       <Route element={<AppShell />}>
+        <Route path="/" element={<DashboardPage />} />
         {pages.map((page) => (
           <Route key={page.path} path={page.path} element={<PlaceholderPage {...page} />} />
         ))}

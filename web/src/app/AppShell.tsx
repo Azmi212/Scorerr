@@ -1,45 +1,74 @@
 import { useEffect, useState } from 'react';
-import {
-  CircleHelp,
-  FileText,
-  Gauge,
-  CodeXml,
-  History,
-  Info,
-  Menu,
-  PanelLeftClose,
-  Plug,
-  Search,
-  Settings,
-  SlidersHorizontal,
-  Sparkles,
-  UserRound,
-  X,
-} from 'lucide-react';
+import { Menu, X } from 'lucide-react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
 import { Button } from '../components/Button';
 
-const navigation = [
-  { to: '/', label: 'Dashboard', icon: Gauge, end: true },
-  { to: '/profiles', label: 'Profils', icon: Sparkles },
-  { to: '/simulation', label: 'Simulation', icon: SlidersHorizontal },
-  { to: '/history', label: 'Historique', icon: History },
-  { to: '/integrations', label: 'Intégrations', icon: Plug },
-  { to: '/settings', label: 'Paramètres', icon: Settings },
-] as const;
+const figmaAssetRoot = '/assets/figma/dashboard';
 
-const resources = [
-  { to: '/documentation', label: 'Documentation', icon: FileText },
-  { to: '/about', label: 'À propos', icon: Info },
-  { to: '/github', label: 'GitHub', icon: CodeXml },
-] as const;
+interface SidebarEntry {
+  to: string;
+  label: string;
+  icon: string;
+  end?: boolean;
+}
+
+const navigation: SidebarEntry[] = [
+  { to: '/', label: 'Dashboard', icon: 'dashboard.svg', end: true },
+  { to: '/profiles', label: 'Profils', icon: 'profiles.svg' },
+  { to: '/simulation', label: 'Simulation', icon: 'simulation.svg' },
+  { to: '/history', label: 'Historique', icon: 'history.svg' },
+  { to: '/integrations', label: 'Intégrations', icon: 'integrations.svg' },
+  { to: '/settings', label: 'Paramètres', icon: 'settings.svg' },
+];
+
+const resources: SidebarEntry[] = [
+  { to: '/documentation', label: 'Documentation', icon: 'documentation.svg' },
+  { to: '/about', label: 'À propos', icon: 'about.svg' },
+  { to: '/github', label: 'GitHub', icon: 'github.svg' },
+];
+
+function FigmaIcon({ asset, className }: { asset: string; className?: string }) {
+  const resolvedClassName = className ?? 'sidebar-icon';
+
+  if (asset === 'simulation.svg') {
+    return (
+      <span className={`${resolvedClassName} sidebar-simulation-icon`} aria-hidden="true">
+        <img src={`${figmaAssetRoot}/${asset}`} alt="" />
+      </span>
+    );
+  }
+
+  return (
+    <img
+      className={resolvedClassName}
+      src={`${figmaAssetRoot}/${asset}`}
+      alt=""
+      aria-hidden="true"
+    />
+  );
+}
 
 function BrandMark() {
   return (
     <span className="brand-mark" aria-hidden="true">
-      ≋
+      <FigmaIcon asset="brand-verification.svg" className="brand-mark-icon" />
     </span>
+  );
+}
+
+function SidebarLink({ to, label, icon, end }: SidebarEntry) {
+  const linkEnd = end === undefined ? {} : { end };
+
+  return (
+    <NavLink
+      to={to}
+      {...linkEnd}
+      className={({ isActive }) => `sidebar-link${isActive ? ' is-active' : ''}`}
+    >
+      <FigmaIcon asset={icon} />
+      <span>{label}</span>
+    </NavLink>
   );
 }
 
@@ -51,18 +80,6 @@ export function AppShell() {
     setSidebarOpen(false);
   }, [location.pathname]);
 
-  const renderLink = ({ to, label, icon: Icon, ...link }: (typeof navigation)[number]) => (
-    <NavLink
-      key={to}
-      to={to}
-      {...('end' in link ? { end: link.end } : {})}
-      className={({ isActive }) => `sidebar-link${isActive ? ' is-active' : ''}`}
-    >
-      <Icon size={18} aria-hidden="true" />
-      <span>{label}</span>
-    </NavLink>
-  );
-
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">
@@ -71,7 +88,7 @@ export function AppShell() {
       <header className="mobile-header">
         <div className="mobile-brand">
           <BrandMark />
-          <span>scorerr</span>
+          <span>Scorerr</span>
         </div>
         <Button
           variant="ghost"
@@ -97,40 +114,48 @@ export function AppShell() {
         className={`sidebar${sidebarOpen ? ' is-open' : ''}`}
         aria-label="Navigation principale"
       >
-        <div className="sidebar-brand" aria-label="scorerr">
-          <BrandMark />
-          <span>scorerr</span>
-          <PanelLeftClose size={16} aria-hidden="true" />
+        <div className="sidebar-top">
+          <div className="sidebar-brand" aria-label="Scorerr">
+            <span className="sidebar-brand-copy">
+              <BrandMark />
+              <span className="sidebar-brand-name">Scorerr</span>
+            </span>
+            <FigmaIcon asset="brand-chevron.svg" className="sidebar-brand-chevron" />
+          </div>
+          <button className="sidebar-search" type="button" aria-label="Rechercher">
+            <span className="sidebar-search-copy">
+              <FigmaIcon asset="search.svg" />
+              <span>Rechercher</span>
+            </span>
+            <kbd className="sidebar-command">
+              <FigmaIcon asset="command.svg" className="sidebar-command-icon" />
+              <span>K</span>
+            </kbd>
+          </button>
+          <div className="sidebar-menu-groups">
+            <nav className="sidebar-nav" aria-label="Sections">
+              {navigation.map((item) => (
+                <SidebarLink key={item.to} {...item} />
+              ))}
+            </nav>
+            <nav className="sidebar-nav sidebar-resources" aria-label="Ressources">
+              {resources.map((item) => (
+                <SidebarLink key={item.to} {...item} />
+              ))}
+            </nav>
+          </div>
         </div>
-        <button className="sidebar-search" type="button" aria-label="Rechercher">
-          <Search size={19} aria-hidden="true" />
-          <span>Rechercher</span>
-          <kbd>⌘ K</kbd>
-        </button>
-        <nav className="sidebar-nav" aria-label="Sections">
-          {navigation.map(renderLink)}
-        </nav>
-        <nav className="sidebar-nav sidebar-resources" aria-label="Ressources">
-          {resources.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) => `sidebar-link${isActive ? ' is-active' : ''}`}
-            >
-              <Icon size={18} aria-hidden="true" />
-              <span>{label}</span>
-            </NavLink>
-          ))}
-        </nav>
-        <div className="sidebar-profile">
-          <span className="sidebar-avatar">
-            <UserRound size={19} aria-hidden="true" />
+        <div className="sidebar-profile" aria-label="Instance locale sans authentification">
+          <span className="sidebar-avatar" aria-hidden="true">
+            <span className="sidebar-avatar-shape">
+              <FigmaIcon asset="account.svg" className="sidebar-avatar-icon" />
+            </span>
           </span>
-          <span>
+          <span className="sidebar-profile-copy">
             <strong>Instance locale</strong>
             <small>Sans authentification</small>
           </span>
-          <CircleHelp size={17} aria-hidden="true" />
+          <FigmaIcon asset="user-menu.svg" className="sidebar-user-menu" />
         </div>
       </aside>
       <main id="main-content" className="app-content" tabIndex={-1}>

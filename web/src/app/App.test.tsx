@@ -31,6 +31,21 @@ describe('App routing and shell', () => {
     }
   });
 
+  it('renders the Figma Dashboard as static visual placeholders', () => {
+    const { container } = renderAt('/');
+
+    expect(screen.getByRole('heading', { name: 'Bonjour Erwan !' })).toBeInTheDocument();
+    expect(container.querySelectorAll('.dashboard-card')).toHaveLength(3);
+    expect(container.querySelector('.dashboard-card-wide')).toBeInTheDocument();
+    expect(
+      container.querySelector('img[src="/assets/figma/dashboard/dashboard.svg"]'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Instance locale')).toBeInTheDocument();
+    expect(screen.getByText('Sans authentification')).toBeInTheDocument();
+    expect(screen.queryByText('michael.robin@gmail.com')).not.toBeInTheDocument();
+    expect(screen.queryByText('Structure prête')).not.toBeInTheDocument();
+  });
+
   it('marks the matching sidebar entry as active', () => {
     renderAt('/profiles/example');
     expect(screen.getByRole('link', { name: 'Profils' })).toHaveClass('is-active');

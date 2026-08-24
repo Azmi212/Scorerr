@@ -7,6 +7,7 @@ const forbidden = [
   'RADARR_API_KEY',
   'SEERR_API_KEY',
   'JELLYSEERR_API_KEY',
+  'figma.com/api/mcp/asset',
   '/__design-system',
   'valeur-de-demonstration',
 ];
